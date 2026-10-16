@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { initDatabase } from './config/database';
+import { connectMongoDB, getMongoStatus } from './config/mongodb';
 import apiRouter from './routes/api';
 
 dotenv.config();
@@ -16,12 +17,26 @@ app.use(express.json());
 // Initialize Database & Seed data
 initDatabase();
 
+// Connect MongoDB Atlas
+connectMongoDB().catch(err => {
+  console.error('MongoDB startup error:', err);
+});
+
 // Mount API routes
 app.use('/api', apiRouter);
 
 // Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+app.get('/api/health', async (req, res) => {
+  const mongo = await getMongoStatus();
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    database: {
+      sqlite: 'connected (crm.sqlite)',
+      mongodb: mongo.status === 'connected' ? `connected (${mongo.host}/${mongo.database})` : mongo.status,
+      mongodbDetails: mongo
+    }
+  });
 });
 
 app.listen(PORT, () => {

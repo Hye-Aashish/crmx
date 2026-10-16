@@ -5,9 +5,36 @@ import * as CRM from '../controllers/crmController';
 const router = Router();
 
 // Public Auth routes
-router.get('/health', (req, res) => {
-  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+router.get('/health', async (req, res) => {
+  const { getMongoStatus } = await import('../config/mongodb');
+  const mongo = await getMongoStatus();
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    database: {
+      sqlite: 'connected (crm.sqlite)',
+      mongodb: mongo.status === 'connected' ? `connected (${mongo.host}/${mongo.database})` : mongo.status,
+      mongodbDetails: mongo
+    }
+  });
 });
+
+router.get('/mongodb/status', async (req, res) => {
+  const { getMongoStatus } = await import('../config/mongodb');
+  const mongo = await getMongoStatus();
+  res.json(mongo);
+});
+
+router.post('/mongodb/sync', async (req, res) => {
+  try {
+    const { syncAllToMongo } = await import('../config/mongodb');
+    const result = await syncAllToMongo();
+    res.json({ message: 'MongoDB synchronized successfully', synced: result });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.post('/auth/login', CRM.login);
 
 // Public Lead Capture Form endpoints (accessible without CRM login)

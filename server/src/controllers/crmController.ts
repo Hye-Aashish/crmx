@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { db, normalizePhone, AVAILABLE_PERMISSIONS } from '../config/database';
 import { AuthenticatedRequest } from '../middleware/auth';
+import { syncRecordToMongo, deleteRecordFromMongo } from '../config/mongodb';
 import bcrypt from 'bcryptjs';
 
 // --- HELPER FUNCTIONS ---
@@ -19,10 +20,49 @@ function generateCode(prefix: string, table: string, column: string): string {
 function logAudit(userId: string | undefined, userName: string | undefined, action: string, entityType: string, entityId: string | string[], details: string) {
   try {
     const id = `aud-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const auditRecord = {
+      id,
+      user_id: userId || 'system',
+      user_name: userName || 'System',
+      action,
+      entity_type: entityType,
+      entity_id: String(entityId),
+      details,
+      created_at: new Date().toISOString()
+    };
+
     db.prepare(`
       INSERT INTO audit_logs (id, user_id, user_name, action, entity_type, entity_id, details)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, userId || 'system', userName || 'System', action, entityType, String(entityId), details);
+    `).run(id, auditRecord.user_id, auditRecord.user_name, action, entityType, String(entityId), details);
+
+    // Sync audit log to MongoDB Atlas
+    syncRecordToMongo('audit_logs', auditRecord);
+
+    // Automatically sync updated or created entity to MongoDB Atlas
+    const tableMap: Record<string, string> = {
+      lead: 'leads',
+      customer: 'customers',
+      order: 'orders',
+      user: 'users',
+      role: 'roles',
+      funnel_stage: 'funnel_stages',
+      follow_up: 'follow_ups',
+      lead_activity: 'lead_activities',
+      web_form: 'web_forms'
+    };
+
+    const targetTable = tableMap[entityType];
+    if (targetTable && typeof entityId === 'string') {
+      if (action.startsWith('DELETE')) {
+        deleteRecordFromMongo(targetTable, entityId);
+      } else {
+        const updatedRow = db.prepare(`SELECT * FROM ${targetTable} WHERE id = ?`).get(entityId);
+        if (updatedRow) {
+          syncRecordToMongo(targetTable, updatedRow);
+        }
+      }
+    }
   } catch (err) {
     console.error('Audit log error:', err);
   }
