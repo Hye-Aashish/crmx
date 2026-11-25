@@ -18,6 +18,7 @@ import {
   MapPin,
   Truck,
   ChevronDown,
+  ChevronUp,
   FileText,
   Flame
 } from 'lucide-react';
@@ -70,6 +71,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
   const customPanelRef = useRef<HTMLDivElement>(null);
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState<boolean>(true);
+  const [funnelExpanded, setFunnelExpanded] = useState(false);
 
   const fetchAnalytics = async () => {
     setLoading(true);
@@ -138,6 +140,26 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
     totalRevenue: 0,
     conversionRate: '0.0'
   };
+  const funnelStages = data?.funnelOverview || [];
+  const funnelPreviewCount = Math.ceil(funnelStages.length / 2);
+  const renderFunnelStage = (stage: any) => {
+    const count = stage.lead_count || 0;
+    const maxLeads = Math.max(...funnelStages.map((item: any) => item.lead_count || 1), 1);
+    const percentage = Math.round((count / maxLeads) * 100);
+    return (
+      <div key={stage.id} className="grid grid-cols-1 sm:grid-cols-[minmax(170px,0.8fr)_minmax(120px,2fr)_auto_auto] items-center gap-x-4 gap-y-1.5 text-xs font-semibold">
+        <span className="flex items-center gap-2 text-slate-700 min-w-0">
+          <span className="w-2.5 h-2.5 rounded-full bg-emerald-600 shrink-0"></span>
+          <span className="truncate">{stage.name}</span>
+        </span>
+        <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+          <div className="h-2 rounded-full transition-all duration-500 bg-emerald-600" style={{ width: `${Math.max(percentage, 4)}%` }}></div>
+        </div>
+        <span className="text-slate-500 font-medium font-mono sm:text-right">₹{(stage.deal_value || 0).toLocaleString()}</span>
+        <span className="justify-self-start sm:justify-self-end bg-emerald-50 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded-full font-mono text-[11px] whitespace-nowrap">{count} leads</span>
+      </div>
+    );
+  };
 
   return (
     <div className="p-4 sm:p-6 max-w-7xl mx-auto space-y-6 animate-fade-in">
@@ -154,7 +176,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
         </div>
 
         {/* Date Filter Pills */}
-        <div className="flex flex-wrap items-center gap-1 p-1.5 bg-white border border-slate-200 rounded-xl shadow-xs self-start xl:self-auto">
+        <div className="grid w-full grid-cols-3 items-stretch gap-1 p-1.5 bg-white border border-slate-200 rounded-xl shadow-xs self-start sm:flex sm:flex-wrap sm:items-center md:flex-nowrap md:w-auto xl:self-auto">
           {[
             { id: 'today', label: 'Today' },
             { id: '7d', label: 'Last 7 Days' },
@@ -165,7 +187,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
             <button
               key={item.id}
               onClick={() => setRange(item.id)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+              className={`min-h-[34px] w-full min-w-0 whitespace-nowrap px-1.5 py-2 text-[11px] rounded-lg font-semibold transition-all sm:min-h-0 sm:w-auto sm:px-3 sm:py-1.5 sm:text-xs ${
                 range === item.id
                   ? 'bg-emerald-600 text-white shadow-xs'
                   : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
@@ -174,21 +196,21 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
               {item.label}
             </button>
           ))}
-          <div className="relative ml-1" ref={customPanelRef}>
+          <div className="relative w-full min-w-0 sm:ml-1 sm:w-auto" ref={customPanelRef}>
             <button
               type="button"
               onClick={() => setCustomOpen((open) => !open)}
               aria-expanded={customOpen}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors ${range === 'custom' || customOpen ? 'border-emerald-500 bg-emerald-50 text-emerald-800' : 'border-slate-200 text-slate-700 hover:border-emerald-300 hover:text-emerald-800'}`}
+              className={`flex min-h-[34px] w-full min-w-0 items-center justify-center gap-1 px-1.5 py-2 text-[11px] whitespace-nowrap rounded-lg border font-semibold transition-colors sm:min-h-0 sm:w-auto sm:gap-2 sm:px-3 sm:py-1.5 sm:text-xs ${range === 'custom' || customOpen ? 'border-emerald-500 bg-emerald-50 text-emerald-800' : 'border-slate-200 text-slate-700 hover:border-emerald-300 hover:text-emerald-800'}`}
             >
-              <Calendar className="w-4 h-4 text-emerald-700" />
-              {range === 'custom' && appliedCustomRange ? `${formatShortDate(appliedCustomRange.from)} Ã¢â‚¬â€œ ${formatShortDate(appliedCustomRange.to)}` : 'Custom'}
-              <ChevronDown className="w-3.5 h-3.5" />
+              <Calendar className="w-3.5 h-3.5 shrink-0 text-emerald-700 sm:w-4 sm:h-4" />
+              <span className="min-w-0 truncate">{range === 'custom' && appliedCustomRange ? `${formatShortDate(appliedCustomRange.from)} - ${formatShortDate(appliedCustomRange.to)}` : 'Custom'}</span>
+              <ChevronDown className="w-3 h-3 shrink-0 sm:w-3.5 sm:h-3.5" />
             </button>
             {customOpen && (
               <div className="absolute right-0 top-full z-30 mt-2 w-[min(340px,calc(100vw-2rem))] rounded-2xl border border-slate-200 bg-white p-4 shadow-xl">
                 <h3 className="text-sm font-bold text-slate-900 mb-3">Custom Date Range</h3>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <label className="text-xs font-semibold text-slate-700">From Date
                     <input type="date" value={customFrom} max={customTo || undefined} onChange={(event) => { setCustomFrom(event.target.value); setDateError(''); }} className="mt-1.5 w-full rounded-lg border border-slate-300 px-2.5 py-2 text-xs text-slate-700 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100" />
                   </label>
@@ -197,7 +219,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
                   </label>
                 </div>
                 {dateError && <p role="alert" className="mt-2 text-xs text-red-600">{dateError}</p>}
-                <div className="mt-3 flex gap-2">
+                <div className="mt-3 flex flex-col gap-2 min-[400px]:flex-row sm:flex-row">
                   <button type="button" onClick={applyCustomRange} className="rounded-lg bg-emerald-600 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-700">Apply</button>
                   <button type="button" onClick={clearCustomRange} className="rounded-lg border border-emerald-500 px-4 py-2 text-xs font-bold text-emerald-800 hover:bg-emerald-50">Clear</button>
                 </div>
@@ -210,7 +232,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
       {requestError && <div role="alert" className="flex items-center justify-between rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"><span>{requestError}</span><button onClick={fetchAnalytics} className="font-bold underline">Retry</button></div>}
 
       {/* 4 Primary Analytics Cards (Green Theme) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-5">
+      <div className="dashboard-kpis grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-5">
         {/* 1. Total Leads */}
         <div
           onClick={() => onNavigate('leads')}
@@ -427,28 +449,33 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
           </div>
 
           <div className="space-y-2">
-            {data?.funnelOverview?.map((stage: any) => {
-              const count = stage.lead_count || 0;
-              const maxLeads = Math.max(...(data.funnelOverview.map((s: any) => s.lead_count || 1)), 1);
-              const percentage = Math.round((count / maxLeads) * 100);
-              return (
-                <div key={stage.id} className="grid grid-cols-1 sm:grid-cols-[minmax(170px,0.8fr)_minmax(120px,2fr)_auto_auto] items-center gap-x-4 gap-y-1.5 text-xs font-semibold">
-                    <span className="flex items-center gap-2 text-slate-700 min-w-0">
-                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-600 shrink-0"></span>
-                      <span className="truncate">{stage.name}</span>
-                    </span>
-                    <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
-                      <div className="h-2 rounded-full transition-all duration-500 bg-emerald-600" style={{ width: `${Math.max(percentage, 4)}%` }}></div>
-                    </div>
-                    <span className="text-slate-500 font-medium font-mono sm:text-right">â‚¹{(stage.deal_value || 0).toLocaleString()}</span>
-                    <span className="justify-self-start sm:justify-self-end bg-emerald-50 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded-full font-mono text-[11px] whitespace-nowrap">{count} leads</span>
+            {funnelStages.slice(0, funnelPreviewCount).map(renderFunnelStage)}
+            {funnelStages.length > funnelPreviewCount && (
+              <div
+                className="grid transition-[grid-template-rows] duration-300 ease-in-out"
+                style={{ gridTemplateRows: funnelExpanded ? '1fr' : '0fr' }}
+                aria-hidden={!funnelExpanded}
+              >
+                <div className="min-h-0 overflow-hidden space-y-2">
+                  {funnelStages.slice(funnelPreviewCount).map(renderFunnelStage)}
                 </div>
-              );
-            })}
-            {!loading && data?.funnelOverview?.length === 0 && (
+              </div>
+            )}
+            {!loading && funnelStages.length === 0 && (
               <div className="rounded-xl border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500">No funnel stages available.</div>
             )}
           </div>
+          {funnelStages.length > funnelPreviewCount && (
+            <button
+              type="button"
+              aria-expanded={funnelExpanded}
+              onClick={() => setFunnelExpanded((expanded) => !expanded)}
+              className="mx-auto mt-3 flex items-center justify-center gap-1 rounded-lg px-3 py-1.5 text-xs font-bold text-emerald-700 transition-colors hover:bg-emerald-50 hover:text-emerald-800"
+            >
+              {funnelExpanded ? 'Show Less' : 'Show More'}
+              {funnelExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+            </button>
+          )}
         </section>
       </div>
       {/* Lead Sources & Agent Performance Leaderboard */}
@@ -468,7 +495,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
                 <div className="flex items-center gap-4 text-slate-600">
                   <span>{src.total} leads</span>
                   <span className="text-emerald-700 font-bold">{src.converted_count} converted</span>
-                  <span className="font-mono text-slate-700">â‚¹{(src.total_deal_value || 0).toLocaleString()}</span>
+                  <span className="font-mono text-slate-700">₹{(src.total_deal_value || 0).toLocaleString()}</span>
                 </div>
               </div>
             ))}
@@ -502,7 +529,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
                 </div>
                 <div className="text-right">
                   <div className="text-xs font-bold text-emerald-700">{agt.converted_leads} converted</div>
-                  <div className="text-[11px] font-mono text-slate-500">â‚¹{(agt.total_deal_value || 0).toLocaleString()}</div>
+                  <div className="text-[11px] font-mono text-slate-500">₹{(agt.total_deal_value || 0).toLocaleString()}</div>
                 </div>
               </div>
             ))}
@@ -550,7 +577,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
                     <div className="text-[11px] text-slate-400 font-mono">{ord.customer_phone}</div>
                   </td>
                   <td className="py-3 px-3 truncate max-w-[180px]">{ord.product_name}</td>
-                  <td className="py-3 px-3 font-bold font-mono">â‚¹{Number(ord.order_amount).toLocaleString()}</td>
+                  <td className="py-3 px-3 font-bold font-mono">₹{Number(ord.order_amount).toLocaleString()}</td>
                   <td className="py-3 px-3">
                     <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200">
                       {ord.order_status}

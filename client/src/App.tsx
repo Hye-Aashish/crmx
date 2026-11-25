@@ -40,6 +40,7 @@ const MainLayout: React.FC = () => {
     else if (tab !== 'employee-performance' && window.location.pathname === '/employee-performance') window.history.pushState({}, '', '/');
   };
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
+  const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
 
   // Search state
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -96,12 +97,16 @@ const MainLayout: React.FC = () => {
         setCurrentTab={setCurrentTab}
         collapsed={sidebarCollapsed}
         setCollapsed={setSidebarCollapsed}
+        mobileOpen={mobileNavigationOpen}
+        onNavigate={() => setMobileNavigationOpen(false)}
+        onClose={() => setMobileNavigationOpen(false)}
       />
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Universal Top Header with Live Search Omnibar */}
         <Navbar
+          onOpenNavigation={() => setMobileNavigationOpen(true)}
           onSearch={handleGlobalSearch}
           openCreateLeadModal={() => {
             setCurrentTab('leads');

@@ -71,6 +71,7 @@ export const Orders: React.FC<OrdersProps> = ({
   const [dateMenuOpen, setDateMenuOpen] = useState(false);
   const [customDatePanelOpen, setCustomDatePanelOpen] = useState(false);
   const dateFilterRef = useRef<HTMLDivElement>(null);
+  const mobileDateFilterRef = useRef<HTMLDivElement>(null);
   const [loadError, setLoadError] = useState('');
   const [summary, setSummary] = useState({ total_orders: 0, in_transit_orders: 0, delivered_orders: 0, total_order_volume: 0, total_deposits: 0, total_due_balance: 0 });
   const activeDateRange = datePreset === 'custom' && !customDateApplied
@@ -168,7 +169,7 @@ export const Orders: React.FC<OrdersProps> = ({
   useEffect(() => {
     if (!dateMenuOpen && !customDatePanelOpen) return;
     const closeOnOutsideClick = (event: MouseEvent) => {
-      if (event.target instanceof Node && !dateFilterRef.current?.contains(event.target)) {
+      if (event.target instanceof Node && !dateFilterRef.current?.contains(event.target) && !mobileDateFilterRef.current?.contains(event.target)) {
         setDateMenuOpen(false);
         setCustomDatePanelOpen(false);
       }
@@ -410,13 +411,13 @@ export const Orders: React.FC<OrdersProps> = ({
           {search && <button type="button" onClick={() => setSearch('')} className="absolute right-2 top-2 p-1 text-slate-400 hover:text-slate-700" aria-label="Clear customer name search"><X className="w-3.5 h-3.5" /></button>}
         </div>
 
-        <div ref={dateFilterRef} className="relative min-w-[270px]">
+        <div ref={dateFilterRef} className="relative hidden min-w-[270px] lg:block">
           <button
             type="button"
             aria-label="Choose order date range"
             aria-expanded={dateMenuOpen}
             onClick={() => setDateMenuOpen((open) => !open)}
-            className="flex w-full items-center gap-2 rounded-xl border border-emerald-500 bg-white px-3 py-2 text-xs text-slate-700 shadow-sm hover:bg-emerald-50/40 focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+            className="hidden w-full items-center gap-2 rounded-xl border border-emerald-500 bg-white px-3 py-2 text-xs text-slate-700 shadow-sm hover:bg-emerald-50/40 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 lg:flex"
           >
             <Calendar className="h-4 w-4 shrink-0 text-emerald-600" />
             <span className="whitespace-nowrap">Date Range:</span>
@@ -427,7 +428,7 @@ export const Orders: React.FC<OrdersProps> = ({
           </button>
 
           {dateMenuOpen && (
-            <div className="absolute left-0 top-full z-40 mt-2 w-[205px] rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl">
+            <div className="absolute left-0 top-full z-40 mt-2 hidden w-[205px] rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl lg:block">
               {([
                 ['all', 'All Time'],
                 ['today', 'Today'],
@@ -486,6 +487,64 @@ export const Orders: React.FC<OrdersProps> = ({
                     </div>
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div ref={mobileDateFilterRef} className="relative grid w-full grid-cols-3 gap-1 sm:flex sm:w-auto sm:flex-wrap md:flex-nowrap lg:hidden">
+          {([
+            ['today', 'Today'],
+            ['last7', 'Last 7 Days'],
+            ['thisMonth', 'This Month'],
+            ['lastMonth', 'Last Month'],
+            ['all', 'All Time']
+          ] as const).map(([preset, label]) => (
+            <button
+              key={preset}
+              type="button"
+              onClick={() => {
+                setDatePreset(preset);
+                setCustomDateApplied(false);
+                setCustomDatePanelOpen(false);
+                setDateMenuOpen(false);
+              }}
+              className={`min-h-[34px] w-full min-w-0 whitespace-nowrap rounded-lg border px-1.5 py-2 text-[11px] font-semibold transition-colors sm:min-h-0 sm:w-auto sm:px-3 sm:py-1.5 sm:text-xs ${datePreset === preset ? 'border-emerald-600 bg-emerald-600 text-white shadow-sm' : 'border-slate-200 bg-white text-slate-700 hover:border-emerald-300 hover:bg-emerald-50'}`}
+            >
+              {label}
+            </button>
+          ))}
+          <button
+            type="button"
+            aria-expanded={customDatePanelOpen}
+            onClick={() => {
+              setDatePreset('custom');
+              setCustomDateApplied(false);
+              setDateMenuOpen(false);
+              setCustomDatePanelOpen((open) => !open);
+            }}
+            className={`flex min-h-[34px] w-full min-w-0 items-center justify-center gap-1 whitespace-nowrap rounded-lg border px-1.5 py-2 text-[11px] font-semibold transition-colors sm:min-h-0 sm:w-auto sm:gap-2 sm:px-3 sm:py-1.5 sm:text-xs ${datePreset === 'custom' ? 'border-emerald-500 bg-emerald-50 text-emerald-800' : 'border-slate-200 bg-white text-slate-700 hover:border-emerald-300 hover:bg-emerald-50'}`}
+          >
+            <Calendar className="h-3.5 w-3.5 shrink-0 text-emerald-700" />
+            <span>Custom</span>
+            <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${customDatePanelOpen ? 'rotate-180' : ''}`} />
+          </button>
+          {customDatePanelOpen && (
+            <div className="absolute right-0 top-full z-50 mt-2 w-[calc(100vw-2rem)] max-w-[340px] rounded-2xl border border-slate-200 bg-white p-4 shadow-xl">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-[11px] font-semibold text-slate-600" htmlFor="orders-mobile-date-from">From Date</label>
+                  <input id="orders-mobile-date-from" type="date" value={customDateFrom} onChange={(e) => { setCustomDateFrom(e.target.value); setCustomDateApplied(false); }} className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-2 text-xs text-slate-700 focus:border-emerald-600 focus:outline-none" />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[11px] font-semibold text-slate-600" htmlFor="orders-mobile-date-to">To Date</label>
+                  <input id="orders-mobile-date-to" type="date" min={customDateFrom || undefined} value={customDateTo} onChange={(e) => { setCustomDateTo(e.target.value); setCustomDateApplied(false); }} className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-2 text-xs text-slate-700 focus:border-emerald-600 focus:outline-none" />
+                </div>
+              </div>
+              {invalidCustomDateRange && <p className="mt-2 text-[11px] font-medium text-red-600">To Date cannot be earlier than From Date.</p>}
+              <div className="mt-3 flex gap-2">
+                <button type="button" disabled={!customDateFrom || !customDateTo || invalidCustomDateRange} onClick={() => { setCustomDateApplied(true); setCustomDatePanelOpen(false); setDateMenuOpen(false); }} className="flex-1 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50">Apply</button>
+                <button type="button" onClick={() => { setCustomDateFrom(''); setCustomDateTo(''); setCustomDateApplied(false); setDatePreset('all'); setCustomDatePanelOpen(false); setDateMenuOpen(false); }} className="rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs font-semibold text-emerald-700 transition-colors hover:bg-emerald-50">Clear</button>
               </div>
             </div>
           )}

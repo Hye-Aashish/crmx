@@ -10,6 +10,7 @@ import {
   ShieldCheck,
   LogOut,
   ChevronRight,
+  X,
   TrendingUp,
   ChartNoAxesCombined
 } from 'lucide-react';
@@ -20,13 +21,19 @@ interface SidebarProps {
   setCurrentTab: (tab: string) => void;
   collapsed: boolean;
   setCollapsed: (collapsed: boolean) => void;
+  mobileOpen: boolean;
+  onNavigate: () => void;
+  onClose: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
   currentTab,
   setCurrentTab,
   collapsed,
-  setCollapsed
+  setCollapsed,
+  mobileOpen,
+  onNavigate,
+  onClose
 }) => {
   const { user, logout } = useAuth();
 
@@ -43,8 +50,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
   ];
 
   return (
+    <>
+    {mobileOpen && <button aria-label="Close navigation" className="mobile-nav-backdrop" onClick={onClose} />}
     <aside
-      className={`bg-slate-900 text-white flex flex-col transition-all duration-300 border-r border-slate-800 select-none z-30 ${
+      className={`app-sidebar bg-slate-900 text-white flex flex-col transition-all duration-300 border-r border-slate-800 select-none z-30 ${mobileOpen ? 'mobile-open' : ''} ${
         collapsed ? 'w-20' : 'w-64'
       }`}
     >
@@ -70,6 +79,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
           )}
         </div>
         <button
+          className="mobile-sidebar-close p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white"
+          onClick={onClose}
+          aria-label="Close navigation"
+        ><X className="w-4 h-4" /></button>
+        <button
           onClick={() => setCollapsed(!collapsed)}
           className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors"
           title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
@@ -93,7 +107,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           return (
             <button
               key={item.id}
-              onClick={() => setCurrentTab(item.id)}
+              onClick={() => { setCurrentTab(item.id); onNavigate(); }}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
                 active
                   ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-md shadow-emerald-600/25 font-semibold'
@@ -141,5 +155,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       </div>
     </aside>
+    </>
   );
 };

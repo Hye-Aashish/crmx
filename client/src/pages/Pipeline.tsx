@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   GitPullRequest,
   Search,
@@ -51,6 +51,14 @@ export const Pipeline: React.FC<PipelineProps> = ({ onOpenCustomer }) => {
 
   // Dragging state
   const [draggedLeadId, setDraggedLeadId] = useState<string | null>(null);
+  const [droppedTouchLeadId, setDroppedTouchLeadId] = useState<string | null>(null);
+  const [touchDropStageId, setTouchDropStageId] = useState<string | null>(null);
+  const touchPressRef = useRef<{ timer: number; leadId: string; startX: number; startY: number; card: HTMLDivElement } | null>(null);
+  const touchDragRef = useRef<{ leadId: string } | null>(null);
+  const touchPreviewRef = useRef<HTMLElement | null>(null);
+  const suppressNextClickRef = useRef(false);
+  const updatingLeadIdsRef = useRef(new Set<string>());
+  const boardRef = useRef<HTMLDivElement>(null);
 
   // Lost reason dialog state
   const [lostDialogLead, setLostDialogLead] = useState<{ id: string; stageId: string } | null>(null);
@@ -143,11 +151,8 @@ export const Pipeline: React.FC<PipelineProps> = ({ onOpenCustomer }) => {
     e.preventDefault();
   };
 
-  const handleDrop = async (e: React.DragEvent, targetStageId: string) => {
-    e.preventDefault();
-    const leadId = draggedLeadId || e.dataTransfer.getData('text/plain');
-    if (!leadId) return;
-
+  const moveLeadToStage = async (leadId: string, targetStageId: string, fromTouch = false) => {
+    if (updatingLeadIdsRef.current.has(leadId)) return;
     const lead = leads.find((l) => l.id === leadId);
     if (!lead || lead.stage_id === targetStageId) {
       setDraggedLeadId(null);
@@ -166,15 +171,143 @@ export const Pipeline: React.FC<PipelineProps> = ({ onOpenCustomer }) => {
     setLeads((prev) =>
       prev.map((l) => (l.id === leadId ? { ...l, stage_id: targetStageId, stage_name: targetStage?.name } : l))
     );
+    if (fromTouch) {
+      setDroppedTouchLeadId(leadId);
+      window.setTimeout(() => setDroppedTouchLeadId((current) => current === leadId ? null : current), 300);
+    }
     setDraggedLeadId(null);
 
+    updatingLeadIdsRef.current.add(leadId);
     try {
       await api.updateLeadStage(leadId, targetStageId);
-      loadPipeline();
+      await loadPipeline();
     } catch (err: any) {
+      setLeads((prev) => prev.map((item) => item.id === leadId
+        ? { ...item, stage_id: lead.stage_id, stage_name: lead.stage_name }
+        : item));
       alert('Failed to update stage: ' + err.message);
-      loadPipeline();
+      await loadPipeline();
+    } finally {
+      updatingLeadIdsRef.current.delete(leadId);
     }
+  };
+
+  const handleDrop = async (e: React.DragEvent, targetStageId: string) => {
+    e.preventDefault();
+    const leadId = draggedLeadId || e.dataTransfer.getData('text/plain');
+    if (leadId) await moveLeadToStage(leadId, targetStageId);
+  };
+
+  const moveLeadToStageRef = useRef(moveLeadToStage);
+  moveLeadToStageRef.current = moveLeadToStage;
+
+  useEffect(() => {
+    const clearPendingPress = () => {
+      if (touchPressRef.current) {
+        window.clearTimeout(touchPressRef.current.timer);
+        touchPressRef.current = null;
+      }
+    };
+
+    const updateTouchDrag = (event: TouchEvent) => {
+      const touch = event.touches[0] || event.changedTouches[0];
+      if (!touch) return;
+
+      if (!touchDragRef.current) {
+        const pending = touchPressRef.current;
+        if (pending && (Math.abs(touch.clientX - pending.startX) > 9 || Math.abs(touch.clientY - pending.startY) > 9)) {
+          clearPendingPress();
+        }
+        return;
+      }
+
+      if (event.cancelable) event.preventDefault();
+      const preview = touchPreviewRef.current;
+      if (preview) preview.style.transform = `translate3d(${touch.clientX + 12}px, ${touch.clientY + 12}px, 0) scale(1.03)`;
+
+      const board = boardRef.current;
+      if (board) {
+        const bounds = board.getBoundingClientRect();
+        if (touch.clientX < bounds.left + 40) board.scrollLeft -= 18;
+        else if (touch.clientX > bounds.right - 40) board.scrollLeft += 18;
+      }
+
+      const stageElement = document.elementFromPoint(touch.clientX, touch.clientY)?.closest<HTMLElement>('[data-pipeline-stage]');
+      setTouchDropStageId(stageElement?.dataset.pipelineStage || null);
+    };
+
+    const finishTouchDrag = (event: TouchEvent, cancelled = false) => {
+      clearPendingPress();
+      const active = touchDragRef.current;
+      if (!active) return;
+
+      const touch = event.changedTouches[0];
+      const stageElement = !cancelled && touch
+        ? document.elementFromPoint(touch.clientX, touch.clientY)?.closest<HTMLElement>('[data-pipeline-stage]')
+        : null;
+      touchDragRef.current = null;
+      touchPreviewRef.current?.remove();
+      touchPreviewRef.current = null;
+      setDraggedLeadId(null);
+      setTouchDropStageId(null);
+      suppressNextClickRef.current = !cancelled;
+      if (!cancelled) window.setTimeout(() => { suppressNextClickRef.current = false; }, 700);
+      if (stageElement?.dataset.pipelineStage) {
+        void moveLeadToStageRef.current(active.leadId, stageElement.dataset.pipelineStage, true);
+      }
+    };
+
+    window.addEventListener('touchmove', updateTouchDrag, { passive: false });
+    window.addEventListener('touchend', finishTouchDrag);
+    const cancelTouchDrag = (event: TouchEvent) => finishTouchDrag(event, true);
+    window.addEventListener('touchcancel', cancelTouchDrag);
+    return () => {
+      window.removeEventListener('touchmove', updateTouchDrag);
+      window.removeEventListener('touchend', finishTouchDrag);
+      window.removeEventListener('touchcancel', cancelTouchDrag);
+      clearPendingPress();
+      touchDragRef.current = null;
+      touchPreviewRef.current?.remove();
+      touchPreviewRef.current = null;
+    };
+  }, []);
+
+  const handleTouchStart = (event: React.TouchEvent<HTMLDivElement>, leadId: string) => {
+    if (event.touches.length !== 1 || touchPressRef.current || touchDragRef.current) return;
+    const touch = event.touches[0];
+    const card = event.currentTarget;
+    const timer = window.setTimeout(() => {
+      if (!card.isConnected) return;
+      touchPressRef.current = null;
+      touchDragRef.current = { leadId };
+      suppressNextClickRef.current = true;
+      const bounds = card.getBoundingClientRect();
+      const preview = card.cloneNode(true) as HTMLElement;
+      preview.removeAttribute('draggable');
+      preview.setAttribute('aria-hidden', 'true');
+      preview.style.position = 'fixed';
+      preview.style.left = '0';
+      preview.style.top = '0';
+      preview.style.width = `${bounds.width}px`;
+      preview.style.zIndex = '1000';
+      preview.style.pointerEvents = 'none';
+      preview.style.opacity = '0.96';
+      preview.style.boxShadow = '0 18px 35px rgba(15, 23, 42, 0.24)';
+      preview.style.transition = 'none';
+      preview.style.transform = `translate3d(${touch.clientX + 12}px, ${touch.clientY + 12}px, 0) scale(1.03)`;
+      document.body.appendChild(preview);
+      touchPreviewRef.current = preview;
+      setDraggedLeadId(leadId);
+    }, 450);
+    touchPressRef.current = { timer, leadId, startX: touch.clientX, startY: touch.clientY, card };
+  };
+
+  const handleTouchClick = (lead: Lead) => {
+    if (suppressNextClickRef.current) {
+      suppressNextClickRef.current = false;
+      return;
+    }
+    void handleOpenLeadDetails(lead);
   };
 
   const handleConfirmLostReason = async () => {
@@ -341,7 +474,7 @@ export const Pipeline: React.FC<PipelineProps> = ({ onOpenCustomer }) => {
   };
 
   return (
-    <div className="p-6 max-w-[1700px] mx-auto space-y-6 animate-fade-in flex flex-col h-[calc(100vh-4rem)]">
+    <div className="pipeline-page p-6 max-w-[1700px] mx-auto space-y-6 animate-fade-in flex flex-col h-[calc(100vh-4rem)]">
       {/* Top Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 shrink-0">
         <div>
@@ -414,7 +547,7 @@ export const Pipeline: React.FC<PipelineProps> = ({ onOpenCustomer }) => {
       </div>
 
       {/* Kanban Board Container */}
-      <div className="flex-1 overflow-x-auto pb-4 pt-1">
+      <div ref={boardRef} className="flex-1 overflow-x-auto pb-4 pt-1">
         <div className="flex gap-4 h-full min-w-max">
           {stages.map((stage, stageIndex) => {
             const stageLeads = leads.filter((l) => l.stage_id === stage.id);
@@ -426,9 +559,10 @@ export const Pipeline: React.FC<PipelineProps> = ({ onOpenCustomer }) => {
             return (
               <div
                 key={stage.id}
+                data-pipeline-stage={stage.id}
                 onDragOver={handleDragOver}
                 onDrop={(e) => handleDrop(e, stage.id)}
-                className="w-80 flex flex-col bg-slate-100/70 border border-slate-200/90 rounded-2xl p-3 shrink-0 shadow-xs hover:border-slate-300 transition-colors"
+                className={`w-80 flex flex-col bg-slate-100/70 border border-slate-200/90 rounded-2xl p-3 shrink-0 shadow-xs hover:border-slate-300 transition-colors ${touchDropStageId === stage.id ? 'ring-2 ring-emerald-500 border-emerald-400 bg-emerald-50' : ''}`}
               >
                 {/* Stage Header */}
                 <div className="pb-3 border-b border-slate-200/80 mb-3">
@@ -519,10 +653,14 @@ export const Pipeline: React.FC<PipelineProps> = ({ onOpenCustomer }) => {
                         <div
                           key={lead.id}
                           draggable
-                          onDragStart={(e) => handleDragStart(e, lead.id)}
-                          onClick={() => handleOpenLeadDetails(lead)}
+                          onDragStart={(e) => {
+                            if (touchPressRef.current || touchDragRef.current) { e.preventDefault(); return; }
+                            handleDragStart(e, lead.id);
+                          }}
+                          onTouchStart={(e) => handleTouchStart(e, lead.id)}
+                          onClick={() => handleTouchClick(lead)}
                           className={`p-3.5 bg-white rounded-xl border border-slate-200/80 shadow-xs hover:shadow-md hover:border-emerald-300 transition-all cursor-pointer space-y-2 select-none group relative ${
-                            draggedLeadId === lead.id ? 'opacity-40 scale-95' : ''
+                            draggedLeadId === lead.id ? 'opacity-40 scale-95' : droppedTouchLeadId === lead.id ? 'animate-fade-in' : ''
                           }`}
                         >
                           {/* Top Row: Code & Priority */}
