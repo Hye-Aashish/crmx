@@ -261,13 +261,28 @@ export const api = {
     });
     return handleResponse(res);
   },
+  updateOrder: async (id: string, payload: {
+    product_name: string;
+    quantity: number;
+    order_amount: number;
+    payment_method: string;
+    deposit: number;
+    shipping_date: string;
+    end_location: string;
+  }) => {
+    const res = await fetch(`${API_URL}/orders/${id}`, {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify(payload)
+    });
+    return handleResponse(res);
+  },
   updateOrderLocation: async (id: string, payload: {
     current_location?: string;
     start_location?: string;
     end_location?: string;
     order_status?: string;
     remarks?: string;
-    payment_status?: string;
   }) => {
     const res = await fetch(`${API_URL}/orders/${id}/location`, {
       method: 'POST',
@@ -317,8 +332,12 @@ export const api = {
   },
 
   // Analytics
-  getAnalytics: async (range: string = '30d') => {
-    const res = await fetch(`${API_URL}/analytics/overview?range=${range}`, { headers: getHeaders() });
+  getAnalytics: async (bounds: { from_date?: string; to_date?: string } = {}) => {
+    const query = new URLSearchParams();
+    if (bounds.from_date) query.set('from_date', bounds.from_date);
+    if (bounds.to_date) query.set('to_date', bounds.to_date);
+    const suffix = query.size ? `?${query.toString()}` : '';
+    const res = await fetch(`${API_URL}/analytics/overview${suffix}`, { headers: getHeaders() });
     return handleResponse(res);
   },
 

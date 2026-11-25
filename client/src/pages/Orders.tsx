@@ -1,7 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   PackageCheck,
-  Search,
   Plus,
   MapPin,
   Clock,
@@ -19,11 +18,17 @@ import {
   ArrowRight,
   ShieldCheck,
   Calendar,
+  ChevronDown,
+  ChevronRight,
+  Check,
   Send,
-  Flag
+  Flag,
+  Pencil
 } from 'lucide-react';
 import { api } from '../services/api';
 import { Order, OrderTracking, Customer } from '../types';
+import { useAuth } from '../context/AuthContext';
+import { displayDateKey, orderDateBounds, type OrderDatePreset } from '../utils/orderDateRange';
 
 interface OrdersProps {
   initialOrderId?: string;
@@ -34,19 +39,58 @@ export const Orders: React.FC<OrdersProps> = ({
   initialOrderId,
   preselectedCustomerId
 }) => {
+  const { user } = useAuth();
+  const canEditOrders = user?.role === 'admin' || user?.permissions?.includes('edit_orders') === true;
+  const canUpdateTracking = user?.role === 'admin' || user?.permissions?.includes('update_order_location') === true;
+  const canCreateOrders = user?.role === 'admin' || user?.permissions?.includes('create_orders') === true;
+  const formatCurrency = (value: number | null | undefined) => value == null || !Number.isFinite(Number(value))
+    ? 'N/A'
+    : new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(Number(value));
+  const formatDate = (value?: string | null) => {
+    if (!value) return 'N/A';
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? 'N/A' : parsed.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  };
+  const paymentStatusLabel = (status?: string) => status === 'Partial' ? 'Partially Paid' : status || 'Pending';
+  const fullAddress = (order: Order) => [order.customer_address, order.customer_city].filter(Boolean).join(', ') || order.end_location || 'N/A';
+
   const [orders, setOrders] = useState<Order[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
 
   // Filters
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [paymentFilter, setPaymentFilter] = useState('');
+  const [paymentMethodFilter, setPaymentMethodFilter] = useState('');
+  const [datePreset, setDatePreset] = useState<OrderDatePreset>('thisMonth');
+  const [customDateFrom, setCustomDateFrom] = useState('');
+  const [customDateTo, setCustomDateTo] = useState('');
+  const [customDateApplied, setCustomDateApplied] = useState(false);
+  const [dateMenuOpen, setDateMenuOpen] = useState(false);
+  const [customDatePanelOpen, setCustomDatePanelOpen] = useState(false);
+  const dateFilterRef = useRef<HTMLDivElement>(null);
+  const mobileDateFilterRef = useRef<HTMLDivElement>(null);
+  const [loadError, setLoadError] = useState('');
+  const [summary, setSummary] = useState({ total_orders: 0, in_transit_orders: 0, delivered_orders: 0, total_order_volume: 0, total_deposits: 0, total_due_balance: 0 });
+  const activeDateRange = datePreset === 'custom' && !customDateApplied
+    ? null
+    : orderDateBounds(datePreset, customDateFrom, customDateTo);
+  const invalidCustomDateRange = Boolean(customDateFrom && customDateTo && customDateTo < customDateFrom);
+  const dateRangeLabel = datePreset === 'all'
+    ? 'All dates'
+    : datePreset === 'custom'
+      ? (customDateApplied && activeDateRange ? `${displayDateKey(activeDateRange.fromKey)} – ${displayDateKey(activeDateRange.toKey)}` : 'Choose dates')
+      : activeDateRange ? `${displayDateKey(activeDateRange.fromKey)} – ${displayDateKey(activeDateRange.toKey)}` : '';
 
   // Selected Order for Tracking Timeline View
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [trackingHistory, setTrackingHistory] = useState<OrderTracking[]>([]);
   const [loadingTracking, setLoadingTracking] = useState(false);
+  const [editingOrder, setEditingOrder] = useState<Order | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editForm, setEditForm] = useState({ product_name: '', quantity: 1, order_amount: 0, payment_method: '', deposit: 0, shipping_date: '', end_location: '' });
 
   // Update Location Modal
   const [showLocationModal, setShowLocationModal] = useState(false);
@@ -55,8 +99,7 @@ export const Orders: React.FC<OrdersProps> = ({
     current_location: '',
     end_location: '',
     order_status: 'In Transit',
-    remarks: '',
-    payment_status: 'Paid'
+    remarks: ''
   });
 
   // Create Order Modal
@@ -66,43 +109,74 @@ export const Orders: React.FC<OrdersProps> = ({
     product_name: '',
     quantity: 1,
     order_amount: 0,
-    payment_status: 'Pending',
     order_status: 'Order Placed',
     start_location: 'New York Logistics Center',
     current_location: 'New York Logistics Center',
     end_location: '',
     delivery_notes: '',
-    expected_delivery_date: ''
+    expected_delivery_date: '',
+    payment_method: '',
+    deposit: 0,
+    shipping_date: ''
   });
 
   const loadOrders = async () => {
+    if (datePreset === 'custom' && !customDateApplied) return;
     setLoading(true);
+    setLoadError('');
     try {
-      const [ordersRes, custRes] = await Promise.all([
-        api.getOrders({
-          search,
-          order_status: statusFilter,
-          payment_status: paymentFilter
-        }),
-        api.getCustomers()
-      ]);
+      const range = activeDateRange;
+      const params: Record<string, string> = {
+        order_status: statusFilter,
+        payment_status: paymentFilter,
+        payment_method: paymentMethodFilter,
+        limit: '500'
+      };
+      if (debouncedSearch.trim()) params.customer_name = debouncedSearch.trim();
+      if (range) {
+        params.created_from = range.from;
+        params.created_to_exclusive = range.toExclusive;
+      }
+      const ordersRes = await api.getOrders(params);
 
       setOrders(ordersRes.data || []);
-      setCustomers(custRes.data || []);
+      setSummary(ordersRes.summary || { total_orders: 0, in_transit_orders: 0, delivered_orders: 0, total_order_volume: 0, total_deposits: 0, total_due_balance: 0 });
 
       if (initialOrderId) {
         handleViewOrder(initialOrderId);
       }
     } catch (err) {
       console.error('Failed to load orders:', err);
+      setLoadError('Could not load orders. Please try again.');
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
+    const timeout = window.setTimeout(() => setDebouncedSearch(search), 250);
+    return () => window.clearTimeout(timeout);
+  }, [search]);
+
+  useEffect(() => {
+    api.getCustomers().then((res) => setCustomers(res.data || [])).catch((err) => console.error('Failed to load customers:', err));
+  }, []);
+
+  useEffect(() => {
     loadOrders();
-  }, [search, statusFilter, paymentFilter]);
+  }, [debouncedSearch, statusFilter, paymentFilter, paymentMethodFilter, datePreset, customDateApplied]);
+
+  useEffect(() => {
+    if (!dateMenuOpen && !customDatePanelOpen) return;
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (event.target instanceof Node && !dateFilterRef.current?.contains(event.target) && !mobileDateFilterRef.current?.contains(event.target)) {
+        setDateMenuOpen(false);
+        setCustomDatePanelOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', closeOnOutsideClick);
+    return () => document.removeEventListener('mousedown', closeOnOutsideClick);
+  }, [dateMenuOpen, customDatePanelOpen]);
 
   // When preselected customer changes, auto-fill destination
   useEffect(() => {
@@ -146,13 +220,12 @@ export const Orders: React.FC<OrdersProps> = ({
 
   const handleOpenLocationModal = (ord: Order) => {
     setSelectedOrder(ord);
-    setUpdateLocForm({
+      setUpdateLocForm({
       start_location: ord.start_location || 'Central Origin Hub',
       current_location: ord.current_location || ord.start_location || 'In Transit Hub',
       end_location: ord.end_location || 'Customer Delivery Address',
       order_status: ord.order_status,
-      remarks: '',
-      payment_status: ord.payment_status
+      remarks: ''
     });
     setShowLocationModal(true);
   };
@@ -181,18 +254,49 @@ export const Orders: React.FC<OrdersProps> = ({
         product_name: '',
         quantity: 1,
         order_amount: 0,
-        payment_status: 'Pending',
         order_status: 'Order Placed',
         start_location: 'New York Logistics Center',
         current_location: 'New York Logistics Center',
         end_location: '',
         delivery_notes: '',
-        expected_delivery_date: ''
+        expected_delivery_date: '',
+        payment_method: '',
+        deposit: 0,
+        shipping_date: ''
       });
       loadOrders();
       handleViewOrder(res.id);
     } catch (err: any) {
       alert(err.message);
+    }
+  };
+
+  const openEditOrder = (order: Order) => {
+    setEditingOrder(order);
+    setEditForm({
+      product_name: order.product_name || '',
+      quantity: Number(order.quantity) || 1,
+      order_amount: Number(order.order_amount) || 0,
+      payment_method: order.payment_method || '',
+      deposit: Number(order.deposit) || 0,
+      shipping_date: order.shipping_date ? order.shipping_date.slice(0, 10) : '',
+      end_location: order.end_location || ''
+    });
+  };
+
+  const handleEditOrderSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingOrder) return;
+    setSavingEdit(true);
+    try {
+      await api.updateOrder(editingOrder.id, editForm);
+      setEditingOrder(null);
+      await loadOrders();
+      if (selectedOrder?.id === editingOrder.id) await handleViewOrder(editingOrder.id);
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setSavingEdit(false);
     }
   };
 
@@ -220,12 +324,10 @@ export const Orders: React.FC<OrdersProps> = ({
   ];
 
   // Aggregate stats
-  const totalOrdersCount = orders.length;
-  const inTransitCount = orders.filter((o) =>
-    ['Dispatched', 'In Transit', 'Reached Local Hub', 'Out for Delivery'].includes(o.order_status)
-  ).length;
-  const deliveredCount = orders.filter((o) => o.order_status === 'Delivered').length;
-  const totalRevenue = orders.reduce((acc, o) => acc + (Number(o.order_amount) || 0), 0);
+  const totalOrdersCount = Number(summary.total_orders) || 0;
+  const inTransitCount = Number(summary.in_transit_orders) || 0;
+  const deliveredCount = Number(summary.delivered_orders) || 0;
+  const totalRevenue = Number(summary.total_order_volume) || 0;
 
   return (
     <div className="p-4 sm:p-6 max-w-7xl mx-auto space-y-6 animate-fade-in">
@@ -241,13 +343,12 @@ export const Orders: React.FC<OrdersProps> = ({
           </p>
         </div>
 
-        <button
-          onClick={() => setShowCreateModal(true)}
-          className="btn-primary self-start sm:self-auto"
-        >
-          <Plus className="w-4 h-4" />
-          Create Order
-        </button>
+        {canCreateOrders && (
+          <button onClick={() => setShowCreateModal(true)} className="btn-primary self-start sm:self-auto">
+            <Plus className="w-4 h-4" />
+            Create Order
+          </button>
+        )}
       </div>
 
       {/* KPI Cards (Clean Green Theme) */}
@@ -283,19 +384,170 @@ export const Orders: React.FC<OrdersProps> = ({
           </div>
           <div className="text-[11px] text-slate-500 font-medium mt-0.5">Cumulative billing</div>
         </div>
+        <div className="bg-white p-4 rounded-2xl border border-emerald-100 shadow-xs bg-gradient-to-br from-white to-emerald-50/30">
+          <div className="text-xs font-semibold text-emerald-800">Total Deposits</div>
+          <div className="text-2xl font-black font-mono text-emerald-800 mt-1">{formatCurrency(Number(summary.total_deposits) || 0)}</div>
+          <div className="text-[11px] text-emerald-700 font-medium mt-0.5">Payments received</div>
+        </div>
+        <div className="bg-white p-4 rounded-2xl border border-amber-100 shadow-xs bg-gradient-to-br from-white to-amber-50/30">
+          <div className="text-xs font-semibold text-amber-800">Total Outstanding Due</div>
+          <div className="text-2xl font-black font-mono text-amber-800 mt-1">{formatCurrency(Number(summary.total_due_balance) || 0)}</div>
+          <div className="text-[11px] text-amber-700 font-medium mt-0.5">Remaining order balances</div>
+        </div>
       </div>
 
       {/* Filter Bar */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs flex flex-wrap items-center gap-3">
-        <div className="relative flex-1 min-w-[240px]">
-          <Search className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
+        <div className="relative flex-1 min-w-[220px]">
+          <User className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by Order ID (5001), Customer, Phone, or Location..."
-            className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-600"
+            placeholder="Search by Name..."
+            aria-label="Search orders by customer name"
+            className="w-full pl-9 pr-9 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-600"
           />
+          {search && <button type="button" onClick={() => setSearch('')} className="absolute right-2 top-2 p-1 text-slate-400 hover:text-slate-700" aria-label="Clear customer name search"><X className="w-3.5 h-3.5" /></button>}
+        </div>
+
+        <div ref={dateFilterRef} className="relative hidden min-w-[270px] lg:block">
+          <button
+            type="button"
+            aria-label="Choose order date range"
+            aria-expanded={dateMenuOpen}
+            onClick={() => setDateMenuOpen((open) => !open)}
+            className="hidden w-full items-center gap-2 rounded-xl border border-emerald-500 bg-white px-3 py-2 text-xs text-slate-700 shadow-sm hover:bg-emerald-50/40 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 lg:flex"
+          >
+            <Calendar className="h-4 w-4 shrink-0 text-emerald-600" />
+            <span className="whitespace-nowrap">Date Range:</span>
+            <span className="flex-1 text-left font-semibold text-emerald-800">
+              {datePreset === 'all' ? 'All Time' : datePreset === 'today' ? 'Today' : datePreset === 'last7' ? 'Last 7 Days' : datePreset === 'thisMonth' ? 'This Month' : datePreset === 'lastMonth' ? 'Last Month' : dateRangeLabel}
+            </span>
+            <ChevronDown className="h-4 w-4 shrink-0 text-emerald-700" />
+          </button>
+
+          {dateMenuOpen && (
+            <div className="absolute left-0 top-full z-40 mt-2 hidden w-[205px] rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl lg:block">
+              {([
+                ['all', 'All Time'],
+                ['today', 'Today'],
+                ['last7', 'Last 7 Days'],
+                ['thisMonth', 'This Month'],
+                ['lastMonth', 'Last Month']
+              ] as const).map(([preset, label]) => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => {
+                    setDatePreset(preset);
+                    setCustomDateApplied(false);
+                    setCustomDatePanelOpen(false);
+                    setDateMenuOpen(false);
+                  }}
+                  className={'flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs transition-colors ' + (datePreset === preset ? 'bg-emerald-50 font-semibold text-emerald-800' : 'text-slate-700 hover:bg-slate-50')}
+                >
+                  <Calendar className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+                  <span className="flex-1">{label}</span>
+                  {datePreset === preset && <Check className="h-3.5 w-3.5 text-emerald-700" />}
+                </button>
+              ))}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDatePreset('custom');
+                    setCustomDateApplied(false);
+                    setCustomDatePanelOpen((open) => !open);
+                    setDateMenuOpen(true);
+                  }}
+                  className={'flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs transition-colors ' + (datePreset === 'custom' ? 'bg-emerald-50 font-semibold text-emerald-800' : 'text-slate-700 hover:bg-slate-50')}
+                >
+                  <Calendar className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+                  <span className="flex-1">Custom</span>
+                  <ChevronRight className="h-3.5 w-3.5 text-slate-500" />
+                </button>
+
+                {customDatePanelOpen && (
+                  <div className="absolute left-full top-0 z-50 ml-3 w-[310px] rounded-2xl border border-slate-200 bg-white p-4 shadow-xl">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="mb-1 block text-[11px] font-semibold text-slate-600" htmlFor="orders-date-from">From Date</label>
+                        <input id="orders-date-from" type="date" value={customDateFrom} onChange={(e) => { setCustomDateFrom(e.target.value); setCustomDateApplied(false); }} className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-2 text-xs text-slate-700 focus:border-emerald-600 focus:outline-none" />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-[11px] font-semibold text-slate-600" htmlFor="orders-date-to">To Date</label>
+                        <input id="orders-date-to" type="date" min={customDateFrom || undefined} value={customDateTo} onChange={(e) => { setCustomDateTo(e.target.value); setCustomDateApplied(false); }} className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-2 text-xs text-slate-700 focus:border-emerald-600 focus:outline-none" />
+                      </div>
+                    </div>
+                    {invalidCustomDateRange && <p className="mt-2 text-[11px] font-medium text-red-600">To Date cannot be earlier than From Date.</p>}
+                    <div className="mt-3 flex gap-2">
+                      <button type="button" disabled={!customDateFrom || !customDateTo || invalidCustomDateRange} onClick={() => { setCustomDateApplied(true); setCustomDatePanelOpen(false); setDateMenuOpen(false); }} className="flex-1 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50">Apply</button>
+                      <button type="button" onClick={() => { setCustomDateFrom(''); setCustomDateTo(''); setCustomDateApplied(false); setDatePreset('all'); setCustomDatePanelOpen(false); setDateMenuOpen(false); }} className="rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs font-semibold text-emerald-700 transition-colors hover:bg-emerald-50">Clear</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div ref={mobileDateFilterRef} className="relative grid w-full grid-cols-3 gap-1 sm:flex sm:w-auto sm:flex-wrap md:flex-nowrap lg:hidden">
+          {([
+            ['today', 'Today'],
+            ['last7', 'Last 7 Days'],
+            ['thisMonth', 'This Month'],
+            ['lastMonth', 'Last Month'],
+            ['all', 'All Time']
+          ] as const).map(([preset, label]) => (
+            <button
+              key={preset}
+              type="button"
+              onClick={() => {
+                setDatePreset(preset);
+                setCustomDateApplied(false);
+                setCustomDatePanelOpen(false);
+                setDateMenuOpen(false);
+              }}
+              className={`min-h-[34px] w-full min-w-0 whitespace-nowrap rounded-lg border px-1.5 py-2 text-[11px] font-semibold transition-colors sm:min-h-0 sm:w-auto sm:px-3 sm:py-1.5 sm:text-xs ${datePreset === preset ? 'border-emerald-600 bg-emerald-600 text-white shadow-sm' : 'border-slate-200 bg-white text-slate-700 hover:border-emerald-300 hover:bg-emerald-50'}`}
+            >
+              {label}
+            </button>
+          ))}
+          <button
+            type="button"
+            aria-expanded={customDatePanelOpen}
+            onClick={() => {
+              setDatePreset('custom');
+              setCustomDateApplied(false);
+              setDateMenuOpen(false);
+              setCustomDatePanelOpen((open) => !open);
+            }}
+            className={`flex min-h-[34px] w-full min-w-0 items-center justify-center gap-1 whitespace-nowrap rounded-lg border px-1.5 py-2 text-[11px] font-semibold transition-colors sm:min-h-0 sm:w-auto sm:gap-2 sm:px-3 sm:py-1.5 sm:text-xs ${datePreset === 'custom' ? 'border-emerald-500 bg-emerald-50 text-emerald-800' : 'border-slate-200 bg-white text-slate-700 hover:border-emerald-300 hover:bg-emerald-50'}`}
+          >
+            <Calendar className="h-3.5 w-3.5 shrink-0 text-emerald-700" />
+            <span>Custom</span>
+            <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${customDatePanelOpen ? 'rotate-180' : ''}`} />
+          </button>
+          {customDatePanelOpen && (
+            <div className="absolute right-0 top-full z-50 mt-2 w-[calc(100vw-2rem)] max-w-[340px] rounded-2xl border border-slate-200 bg-white p-4 shadow-xl">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-[11px] font-semibold text-slate-600" htmlFor="orders-mobile-date-from">From Date</label>
+                  <input id="orders-mobile-date-from" type="date" value={customDateFrom} onChange={(e) => { setCustomDateFrom(e.target.value); setCustomDateApplied(false); }} className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-2 text-xs text-slate-700 focus:border-emerald-600 focus:outline-none" />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[11px] font-semibold text-slate-600" htmlFor="orders-mobile-date-to">To Date</label>
+                  <input id="orders-mobile-date-to" type="date" min={customDateFrom || undefined} value={customDateTo} onChange={(e) => { setCustomDateTo(e.target.value); setCustomDateApplied(false); }} className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-2 text-xs text-slate-700 focus:border-emerald-600 focus:outline-none" />
+                </div>
+              </div>
+              {invalidCustomDateRange && <p className="mt-2 text-[11px] font-medium text-red-600">To Date cannot be earlier than From Date.</p>}
+              <div className="mt-3 flex gap-2">
+                <button type="button" disabled={!customDateFrom || !customDateTo || invalidCustomDateRange} onClick={() => { setCustomDateApplied(true); setCustomDatePanelOpen(false); setDateMenuOpen(false); }} className="flex-1 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50">Apply</button>
+                <button type="button" onClick={() => { setCustomDateFrom(''); setCustomDateTo(''); setCustomDateApplied(false); setDatePreset('all'); setCustomDatePanelOpen(false); setDateMenuOpen(false); }} className="rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs font-semibold text-emerald-700 transition-colors hover:bg-emerald-50">Clear</button>
+              </div>
+            </div>
+          )}
         </div>
 
         <select
@@ -319,140 +571,85 @@ export const Orders: React.FC<OrdersProps> = ({
           <option value="">All Payment Statuses</option>
           <option value="Paid">Paid</option>
           <option value="Pending">Pending</option>
-          <option value="Partial">Partial</option>
+          <option value="Partial">Partially Paid</option>
           <option value="Refunded">Refunded</option>
+        </select>
+        <select
+          value={paymentMethodFilter}
+          onChange={(e) => setPaymentMethodFilter(e.target.value)}
+          className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700 focus:outline-none focus:border-emerald-600"
+        >
+          <option value="">All Payment Methods</option>
+          {['Cash', 'UPI', 'Card', 'Bank Transfer', 'Other'].map((method) => <option key={method} value={method}>{method}</option>)}
         </select>
       </div>
 
-      {/* Orders Table with 3 Locations */}
+      {loadError && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-xs font-medium text-red-700">{loadError}</div>}
+
+      {/* Orders Table with preserved tracking actions */}
       <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead>
+          <table className="w-full min-w-[1750px] text-left text-xs">
+            <thead className="sticky top-0 z-10">
               <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold uppercase tracking-wider text-[11px]">
-                <th className="py-3 px-3">Order Code</th>
-                <th className="py-3 px-3">Customer Details</th>
-                <th className="py-3 px-3">Product / Service</th>
-                <th className="py-3 px-3">Amount</th>
-                <th className="py-3 px-3">Status</th>
-                <th className="py-3 px-3">3-Point Route Journey</th>
-                <th className="py-3 px-3 text-right">Actions</th>
+                <th className="py-3 px-3">SR NO</th>
+                <th className="py-3 px-3">ORDER CODE</th>
+                <th className="py-3 px-3">CUSTOMER NAME</th>
+                <th className="py-3 px-3">ORDER DATE</th>
+                <th className="py-3 px-3">EMAIL</th>
+                <th className="py-3 px-3">CONTACT</th>
+                <th className="py-3 px-3">ADDRESS</th>
+                <th className="py-3 px-3">PRODUCT DETAILS</th>
+                <th className="py-3 px-3">TOTAL PAYMENT</th>
+                <th className="py-3 px-3">PAYMENT METHOD</th>
+                <th className="py-3 px-3">DEPOSIT</th>
+                <th className="py-3 px-3">DUE BALANCE</th>
+                <th className="py-3 px-3">SHIPPING DATE</th>
+                <th className="py-3 px-3 text-right">ACTIONS</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
               {loading ? (
-                <tr>
-                  <td colSpan={7} className="py-10 text-center text-slate-400">
-                    Loading orders...
-                  </td>
-                </tr>
+                <tr><td colSpan={14} className="py-10 text-center text-slate-400">Loading orders...</td></tr>
               ) : orders.length === 0 ? (
-                <tr>
-                  <td colSpan={7} className="py-10 text-center text-slate-400">
-                    No orders found matching filters.
-                  </td>
-                </tr>
-              ) : (
-                orders.map((ord) => (
+                <tr><td colSpan={14} className="py-10 text-center text-slate-400">No orders found matching filters.</td></tr>
+              ) : orders.map((ord, index) => {
+                const due = ord.order_amount == null || ord.deposit == null ? null : Number(ord.order_amount) - Number(ord.deposit);
+                return (
                   <tr key={ord.id} className="hover:bg-slate-50/70 transition-colors">
-                    {/* Order Code */}
+                    <td className="py-3 px-3 font-semibold text-slate-600">{index + 1}</td>
                     <td className="py-3 px-3">
-                      <button
-                        onClick={() => handleViewOrder(ord.id)}
-                        className="font-mono font-bold text-emerald-700 hover:text-emerald-900 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200"
-                      >
-                        {ord.order_code}
-                      </button>
+                      <span className="inline-flex w-fit items-center whitespace-nowrap rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 font-mono text-[12px] font-bold leading-none text-emerald-700">{ord.order_code || 'N/A'}</span>
                     </td>
-
-                    {/* Customer */}
+                    <td className="py-3 px-3"><div className="font-semibold text-slate-900">{ord.current_customer_name || ord.customer_name || 'N/A'}</div></td>
+                    <td className="py-3 px-3 whitespace-nowrap">{formatDate(ord.order_date)}</td>
+                    <td className="py-3 px-3">{ord.customer_email || 'N/A'}</td>
+                    <td className="py-3 px-3 whitespace-nowrap">{ord.current_customer_phone || ord.customer_phone || 'N/A'}</td>
+                    <td className="py-3 px-3 max-w-[250px] whitespace-normal">{fullAddress(ord)}</td>
                     <td className="py-3 px-3">
-                      <div className="font-semibold text-slate-900">{ord.customer_name}</div>
-                      <div className="text-[11px] font-mono text-slate-500">{ord.customer_phone}</div>
+                      <div className="font-medium text-slate-800">{ord.product_name || 'N/A'}</div>
+                      <div className="text-[11px] text-slate-500">Qty: {ord.quantity ?? 'N/A'} | Unit price: {ord.quantity && ord.order_amount != null ? formatCurrency(Number(ord.order_amount) / Number(ord.quantity)) : 'N/A'}</div>
                     </td>
-
-                    {/* Product */}
-                    <td className="py-3 px-3">
-                      <div className="font-medium text-slate-800 truncate max-w-[170px]">
-                        {ord.product_name}
-                      </div>
-                      <div className="text-[11px] text-slate-400">Qty: {ord.quantity}</div>
-                    </td>
-
-                    {/* Amount & Payment */}
-                    <td className="py-3 px-3">
-                      <div className="font-mono font-bold text-slate-900">
-                        ₹{Number(ord.order_amount).toLocaleString()}
-                      </div>
-                      <span
-                        className={`inline-block px-1.5 py-0.2 rounded text-[10px] font-bold ${
-                          ord.payment_status === 'Paid'
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : 'bg-amber-100 text-amber-800'
-                        }`}
-                      >
-                        {ord.payment_status}
+                    <td className="py-3 px-3 whitespace-nowrap">
+                      <div className="font-mono font-bold text-slate-900">{formatCurrency(ord.order_amount)}</div>
+                      <span className={'inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ' + (ord.payment_status === 'Paid' ? 'bg-emerald-100 text-emerald-800' : ord.payment_status === 'Partial' ? 'bg-blue-100 text-blue-800' : 'bg-amber-100 text-amber-800')}>
+                        {paymentStatusLabel(ord.payment_status)}
                       </span>
                     </td>
-
-                    {/* Order Status */}
+                    <td className="py-3 px-3">{ord.payment_method || 'N/A'}</td>
+                    <td className="py-3 px-3 font-mono whitespace-nowrap">{formatCurrency(ord.deposit)}</td>
+                    <td className={'py-3 px-3 font-mono font-semibold whitespace-nowrap ' + (due == null ? 'text-slate-500' : due > 0 ? 'text-amber-800' : 'text-emerald-800')}>{formatCurrency(due)}</td>
+                    <td className="py-3 px-3 whitespace-nowrap">{formatDate(ord.shipping_date)}</td>
                     <td className="py-3 px-3">
-                      <span
-                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold border ${
-                          ord.order_status === 'Delivered'
-                            ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
-                            : 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                        }`}
-                      >
-                        {ord.order_status === 'Delivered' && <CheckCircle2 className="w-3 h-3" />}
-                        {ord.order_status}
-                      </span>
-                    </td>
-
-                    {/* 3 Locations Route */}
-                    <td className="py-3 px-3">
-                      <div className="space-y-1 text-[11px] max-w-[280px]">
-                        {/* Start to End line */}
-                        <div className="flex items-center gap-1 text-slate-500 truncate">
-                          <span className="font-semibold text-slate-700">Start:</span>
-                          <span className="truncate">{ord.start_location || 'Origin Hub'}</span>
-                        </div>
-                        {/* Current Checkpoint */}
-                        <div className="flex items-center gap-1 font-bold text-emerald-800 bg-emerald-50/80 px-2 py-0.5 rounded border border-emerald-200 truncate">
-                          <MapPin className="w-3 h-3 text-emerald-600 shrink-0" />
-                          <span className="truncate">Current: {ord.current_location}</span>
-                        </div>
-                        {/* Delivery End */}
-                        <div className="flex items-center gap-1 text-slate-500 truncate">
-                          <span className="font-semibold text-slate-700">End:</span>
-                          <span className="truncate">{ord.end_location || 'Delivery Address'}</span>
-                        </div>
-                      </div>
-                    </td>
-
-                    {/* Tracking Actions */}
-                    <td className="py-3 px-3 text-right">
                       <div className="flex items-center justify-end gap-1.5">
-                        <button
-                          onClick={() => handleOpenLocationModal(ord)}
-                          className="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-bold transition-all flex items-center gap-1"
-                          title="Update current checkpoint or location"
-                        >
-                          <Navigation className="w-3 h-3 text-emerald-600" />
-                          Update Hub
-                        </button>
-                        <button
-                          onClick={() => handleViewOrder(ord.id)}
-                          className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-all"
-                          title="View Full Tracking Timeline"
-                        >
-                          <History className="w-3.5 h-3.5" />
-                        </button>
+                        {canUpdateTracking && <button onClick={() => handleOpenLocationModal(ord)} className="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-[11px] font-bold inline-flex items-center justify-center gap-1.5 transition-colors duration-200 whitespace-nowrap" title="Update current checkpoint"><Navigation className="w-3 h-3" />Update Hub</button>}
+                        <button onClick={() => handleViewOrder(ord.id)} className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg" title="Order details and tracking history" aria-label="Order details and tracking history"><History className="w-3.5 h-3.5" /></button>
+                        {canEditOrders && <button onClick={() => openEditOrder(ord)} className="p-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-lg" title="Edit order" aria-label="Edit order"><Pencil className="w-3.5 h-3.5" /></button>}
                       </div>
                     </td>
                   </tr>
-                ))
-              )}
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -530,16 +727,22 @@ export const Orders: React.FC<OrdersProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">Payment Status</label>
-                  <select
-                    value={newOrder.payment_status}
-                    onChange={(e) => setNewOrder({ ...newOrder, payment_status: e.target.value as any })}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-800 focus:outline-none focus:border-emerald-600"
-                  >
-                    <option value="Paid">Paid</option>
-                    <option value="Pending">Pending</option>
-                    <option value="Partial">Partial</option>
+                  <label className="block font-bold text-slate-700 mb-1">Payment Method</label>
+                  <select value={newOrder.payment_method} onChange={(e) => setNewOrder({ ...newOrder, payment_method: e.target.value })} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-800 focus:outline-none focus:border-emerald-600">
+                    <option value="">Select method</option>
+                    {['Cash', 'UPI', 'Card', 'Bank Transfer', 'Other'].map((method) => <option key={method} value={method}>{method}</option>)}
                   </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Deposit (INR)</label>
+                  <input type="number" min="0" max={newOrder.order_amount} value={newOrder.deposit} onChange={(e) => setNewOrder({ ...newOrder, deposit: Number(e.target.value) })} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium focus:outline-none focus:border-emerald-600" />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Shipping Date</label>
+                  <input type="date" value={newOrder.shipping_date} onChange={(e) => setNewOrder({ ...newOrder, shipping_date: e.target.value })} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium focus:outline-none focus:border-emerald-600" />
                 </div>
               </div>
 
@@ -781,16 +984,9 @@ export const Orders: React.FC<OrdersProps> = ({
                 </div>
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Payment Status</label>
-                  <select
-                    value={updateLocForm.payment_status}
-                    onChange={(e) => setUpdateLocForm({ ...updateLocForm, payment_status: e.target.value })}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-800 focus:outline-none focus:border-emerald-600"
-                  >
-                    <option value="Paid">Paid</option>
-                    <option value="Pending">Pending</option>
-                    <option value="Partial">Partial</option>
-                    <option value="Refunded">Refunded</option>
-                  </select>
+                  <div className="px-3 py-2 bg-slate-100 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700">
+                    {paymentStatusLabel(selectedOrder?.payment_status)}
+                  </div>
                 </div>
               </div>
 
@@ -820,6 +1016,38 @@ export const Orders: React.FC<OrdersProps> = ({
                 <button type="submit" className="btn-primary">
                   Save Checkpoint to History
                 </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {editingOrder && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-xl w-full p-6 shadow-2xl border border-slate-100 max-h-[92vh] overflow-y-auto animate-fade-in space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div>
+                <h2 className="text-lg font-bold text-slate-900">Edit Order</h2>
+                <p className="text-xs text-slate-500">{editingOrder.order_code} · {editingOrder.current_customer_name || editingOrder.customer_name}</p>
+              </div>
+              <button type="button" onClick={() => setEditingOrder(null)} className="text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+            </div>
+            <form onSubmit={handleEditOrderSubmit} className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Product / Service *</label>
+                <input required value={editForm.product_name} onChange={(e) => setEditForm({ ...editForm, product_name: e.target.value })} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-emerald-600" />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div><label className="block font-bold text-slate-700 mb-1">Quantity *</label><input required type="number" min="1" step="1" value={editForm.quantity} onChange={(e) => setEditForm({ ...editForm, quantity: Number(e.target.value) })} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs" /></div>
+                <div><label className="block font-bold text-slate-700 mb-1">Total Payment (INR) *</label><input required type="number" min="0" step="0.01" value={editForm.order_amount} onChange={(e) => setEditForm({ ...editForm, order_amount: Number(e.target.value) })} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs" /></div>
+                <div><label className="block font-bold text-slate-700 mb-1">Payment Method</label><select value={editForm.payment_method} onChange={(e) => setEditForm({ ...editForm, payment_method: e.target.value })} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs"><option value="">Not specified</option>{['Cash', 'UPI', 'Card', 'Bank Transfer', 'Other'].map((method) => <option key={method} value={method}>{method}</option>)}</select></div>
+                <div><label className="block font-bold text-slate-700 mb-1">Deposit (INR)</label><input type="number" min="0" max={editForm.order_amount} step="0.01" value={editForm.deposit} onChange={(e) => setEditForm({ ...editForm, deposit: Number(e.target.value) })} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs" /><span className="text-[10px] text-slate-500">Due: {formatCurrency(editForm.order_amount - editForm.deposit)}</span></div>
+                <div><label className="block font-bold text-slate-700 mb-1">Shipping Date</label><input type="date" value={editForm.shipping_date} onChange={(e) => setEditForm({ ...editForm, shipping_date: e.target.value })} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs" /></div>
+                <div><label className="block font-bold text-slate-700 mb-1">Delivery Address</label><input value={editForm.end_location} onChange={(e) => setEditForm({ ...editForm, end_location: e.target.value })} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs" /></div>
+              </div>
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                <button type="button" onClick={() => setEditingOrder(null)} className="btn-secondary">Cancel</button>
+                <button type="submit" disabled={savingEdit} className="btn-primary">{savingEdit ? 'Saving...' : 'Save Changes'}</button>
               </div>
             </form>
           </div>
@@ -906,31 +1134,33 @@ export const Orders: React.FC<OrdersProps> = ({
               </div>
             </div>
 
-            {/* Quick Meta Grid */}
+            {/* Complete Order Details */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs bg-slate-50 p-4 rounded-xl border border-slate-100">
               <div>
                 <span className="text-slate-400 font-semibold block text-[11px]">Customer</span>
-                <span className="font-bold text-slate-900">{selectedOrder.customer_name}</span>
-                <div className="font-mono text-slate-500 text-[10px]">{selectedOrder.customer_phone}</div>
+                <span className="font-bold text-slate-900">{selectedOrder.current_customer_name || selectedOrder.customer_name || 'N/A'}</span>
+                <div className="font-mono text-slate-500 text-[10px]">{selectedOrder.current_customer_phone || selectedOrder.customer_phone || 'N/A'}</div>
+                <div className="text-slate-500 text-[10px]">{selectedOrder.customer_email || 'N/A'}</div>
+                <div className="text-slate-500 text-[10px]">{fullAddress(selectedOrder)}</div>
               </div>
               <div>
-                <span className="text-slate-400 font-semibold block text-[11px]">Total Amount</span>
-                <span className="font-mono font-bold text-emerald-700 text-sm">
-                  ₹{Number(selectedOrder.order_amount).toLocaleString()}
-                </span>
-                <div className="text-slate-500 text-[10px]">{selectedOrder.payment_status}</div>
+                <span className="text-slate-400 font-semibold block text-[11px]">Product / Quantity</span>
+                <span className="font-bold text-slate-900">{selectedOrder.product_name || 'N/A'}</span>
+                <div className="text-slate-500 text-[10px]">Quantity: {selectedOrder.quantity ?? 'N/A'}</div>
+                <div className="text-slate-500 text-[10px]">Unit price: {selectedOrder.quantity ? formatCurrency(Number(selectedOrder.order_amount) / Number(selectedOrder.quantity)) : 'N/A'}</div>
               </div>
               <div>
-                <span className="text-slate-400 font-semibold block text-[11px]">Order Date</span>
-                <span className="font-medium text-slate-700">
-                  {new Date(selectedOrder.order_date).toLocaleDateString()}
-                </span>
+                <span className="text-slate-400 font-semibold block text-[11px]">Payment</span>
+                <span className="font-mono font-bold text-emerald-700 text-sm">{formatCurrency(Number(selectedOrder.order_amount))}</span>
+                <div className="text-slate-500 text-[10px]">Deposit: {formatCurrency(selectedOrder.deposit)}</div>
+                <div className="text-slate-500 text-[10px]">Due: {selectedOrder.deposit == null ? 'N/A' : formatCurrency(Number(selectedOrder.order_amount) - Number(selectedOrder.deposit))}</div>
+                <div className="text-slate-500 text-[10px]">{selectedOrder.payment_method || 'N/A'} | {paymentStatusLabel(selectedOrder.payment_status)}</div>
               </div>
               <div>
-                <span className="text-slate-400 font-semibold block text-[11px]">Staff / Assigned</span>
-                <span className="font-medium text-slate-700">
-                  {selectedOrder.assigned_staff_name || 'Rajesh Sharma (Admin)'}
-                </span>
+                <span className="text-slate-400 font-semibold block text-[11px]">Dates / Assigned</span>
+                <div className="font-medium text-slate-700">Ordered: {formatDate(selectedOrder.order_date)}</div>
+                <div className="font-medium text-slate-700">Shipping: {formatDate(selectedOrder.shipping_date)}</div>
+                <div className="font-medium text-slate-700">Staff: {selectedOrder.assigned_staff_name || 'N/A'}</div>
               </div>
             </div>
 
@@ -939,15 +1169,15 @@ export const Orders: React.FC<OrdersProps> = ({
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
                   <History className="w-4 h-4 text-emerald-600" />
-                  Checkpoint History Timeline (Audit Log)
+                  Checkpoint History Timeline (Audit Log) <span className="font-mono text-emerald-700">· {selectedOrder.order_code}</span>
                 </h3>
-                <button
+                {canUpdateTracking && <button
                   onClick={() => handleOpenLocationModal(selectedOrder)}
                   className="text-xs font-bold text-emerald-700 hover:text-emerald-800 flex items-center gap-1 px-3 py-1 bg-emerald-50 hover:bg-emerald-100 rounded-lg border border-emerald-200 transition-all"
                 >
                   <Navigation className="w-3.5 h-3.5" />
                   + Update Checkpoint
-                </button>
+                </button>}
               </div>
 
               <div className="space-y-4 relative before:absolute before:left-3.5 before:top-2 before:bottom-2 before:w-0.5 before:bg-emerald-200">

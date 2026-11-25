@@ -35,6 +35,7 @@ export const AVAILABLE_PERMISSIONS: PermissionDef[] = [
 
   { id: 'view_orders', name: 'View Orders', description: 'View order records, amounts, and buyer details', category: 'Orders' },
   { id: 'create_orders', name: 'Create Orders', description: 'Create and place new sales orders', category: 'Orders' },
+  { id: 'edit_orders', name: 'Edit Orders & Payments', description: 'Edit order details, payment methods, deposits and shipping dates', category: 'Orders' },
   { id: 'update_order_location', name: 'Update Transit Tracking', description: 'Log current checkpoints and update tracking statuses', category: 'Orders' },
 
   { id: 'view_customers', name: 'View Customers', description: 'Access customer profiles and lifetime orders', category: 'Customers' },
@@ -282,12 +283,15 @@ export function initDatabase() {
       quantity INTEGER DEFAULT 1,
       order_amount REAL NOT NULL,
       payment_status TEXT DEFAULT 'Pending' CHECK(payment_status IN ('Pending', 'Partial', 'Paid', 'Refunded')),
+      payment_method TEXT,
+      deposit REAL DEFAULT 0,
       order_status TEXT DEFAULT 'Order Placed',
       start_location TEXT DEFAULT 'New York Logistics Center',
       current_location TEXT DEFAULT 'Processing Facility',
       end_location TEXT DEFAULT 'Customer Delivery Address',
       last_location_update DATETIME DEFAULT CURRENT_TIMESTAMP,
       expected_delivery_date DATETIME,
+      shipping_date DATETIME,
       delivery_notes TEXT,
       assigned_staff_id TEXT,
       created_by TEXT,
@@ -312,7 +316,16 @@ export function initDatabase() {
     if (!existingColumns.includes('end_location')) {
       db.exec("ALTER TABLE orders ADD COLUMN end_location TEXT DEFAULT 'Customer Delivery Address'");
     }
-
+    if (!existingColumns.includes('payment_method')) {
+      db.exec('ALTER TABLE orders ADD COLUMN payment_method TEXT');
+    }
+    if (!existingColumns.includes('deposit')) {
+      db.exec('ALTER TABLE orders ADD COLUMN deposit REAL DEFAULT 0');
+      db.exec("UPDATE orders SET deposit = order_amount WHERE payment_status = 'Paid'");
+    }
+    if (!existingColumns.includes('shipping_date')) {
+      db.exec('ALTER TABLE orders ADD COLUMN shipping_date DATETIME');
+    }
     // Update existing orders to English localization
     db.prepare(`
       UPDATE orders SET

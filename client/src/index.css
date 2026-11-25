@@ -52,3 +52,83 @@
 .btn-secondary {
   @apply flex items-center justify-center gap-2 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl transition-all text-xs sm:text-sm;
 }
+
+
+/* Responsive layout adjustments. Desktop rules above remain untouched. */
+.mobile-menu-button, .mobile-sidebar-close { display: none; }
+.mobile-nav-backdrop { display: none; }
+
+@media (min-width: 768px) and (max-width: 1023px) {
+  .app-sidebar { width: 5rem !important; flex: 0 0 5rem; }
+  .app-sidebar > div:first-child { justify-content: center; padding-left: .75rem; padding-right: .75rem; }
+  .app-sidebar > div:first-child > div > div:not(:first-child),
+  .app-sidebar nav button > span,
+  .app-sidebar nav button > span + span,
+  .app-sidebar > div:last-child > div > div { display: none; }
+  .app-sidebar nav button { justify-content: center; padding-left: .75rem; padding-right: .75rem; }
+  .app-sidebar nav { padding-left: .5rem; padding-right: .5rem; }
+  .app-sidebar > div:last-child > div { justify-content: center; }
+}
+
+@media (max-width: 767px) {
+  html, body, #root { width: 100%; min-width: 320px; min-height: 100%; }
+  body { overflow-x: hidden; }
+  .app-sidebar {
+    position: fixed; inset: 0 auto 0 0; width: min(17rem, 86vw) !important;
+    flex: none; transform: translateX(-105%); transition: transform .25s ease;
+    z-index: 60; box-shadow: 12px 0 32px rgba(15,23,42,.18);
+  }
+  .app-sidebar.mobile-open { transform: translateX(0); }
+  .app-sidebar .mobile-sidebar-close { display: inline-flex; }
+  .app-sidebar > div:first-child > button:last-child { display: none; }
+  .mobile-nav-backdrop {
+    display: block; position: fixed; inset: 0; z-index: 59;
+    background: rgba(15,23,42,.48); border: 0;
+  }
+  .mobile-menu-button {
+    display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+    width: 2.25rem; height: 2.25rem; margin-right: .5rem; color: #475569;
+  }
+  .app-navbar { gap: .25rem; padding-left: .625rem; padding-right: .625rem; }
+  .navbar-search { min-width: 0; }
+  .navbar-search input { padding-right: 3.75rem; text-overflow: ellipsis; }
+  .navbar-search input::placeholder { color: transparent; }
+  .app-navbar > div:last-child { gap: .35rem; margin-left: .35rem; }
+  .app-navbar > div:last-child > div > button { padding-left: .6rem; padding-right: .6rem; }
+  main { min-width: 0; }
+  main > div { min-width: 0; }
+  main > div.p-6 { padding: 1rem; }
+  .app-sidebar + div { min-width: 0; width: 100%; }
+  .app-navbar .navbar-search > div { max-width: calc(100vw - 9rem); }
+  .fixed.inset-0.z-50 { overflow-y: auto; align-items: flex-start; }
+  .fixed.inset-0.z-50 > div { max-height: calc(100dvh - 2rem); overflow-y: auto; margin-top: auto; margin-bottom: auto; }
+  .max-w-7xl, .max-w-\[1600px\], .max-w-\[1700px\] { max-width: 100%; }
+  [class*="grid-cols-"] { min-width: 0; }
+  .overflow-hidden:has(> table), .overflow-hidden:has(> div > table),
+  .overflow-hidden:has(table) { overflow-x: auto; }
+  table { min-width: 640px; }
+  .employee-tabs { max-width: 100%; }
+  input, select, textarea { max-width: 100%; }
+}
+
+@media (max-width: 639px) {
+  .app-navbar { padding-left: .5rem; padding-right: .5rem; }
+  .app-navbar .navbar-search input { font-size: 11px; }
+  .app-navbar > div:last-child { margin-left: .2rem; }
+  .app-navbar > div:last-child > div > button { min-width: 2.25rem; }
+  .app-navbar > div:last-child > div > button > svg:last-child { display: none; }
+  .app-navbar > div:last-child > div > button > span { display: none; }
+  .app-navbar .navbar-search form > button[type="submit"] { padding-left: .55rem; padding-right: .55rem; }
+  .grid.grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  @media (min-width: 360px) {
+    .dashboard-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  .employee-tabs { overflow-x: auto; }
+  .employee-tabs button { white-space: nowrap; }
+  .pipeline-page { height: auto; min-height: calc(100dvh - 4rem); }
+  .relative.min-w-\[270px\] { min-width: 0; width: 100%; }
+  .relative.min-w-\[220px\] { min-width: 0; width: 100%; }
+  .min-w-\[320px\] { min-width: 0; max-width: calc(100vw - 2rem); right: 0; }
+  .relative .absolute.left-full { left: 0; right: 0; top: calc(100% + .5rem); margin-left: 0; width: min(310px, calc(100vw - 2rem)); }
+  .fixed.inset-0.z-50 > div { width: 100%; }
+}

@@ -10,9 +10,9 @@ import { Customers } from './pages/Customers';
 import { Orders } from './pages/Orders';
 import { GlobalSearch } from './pages/GlobalSearch';
 import { UsersPage } from './pages/Users';
-import { FormBuilder } from './pages/FormBuilder';
 import { PublicForm } from './pages/PublicForm';
 import { Login } from './pages/Login';
+import { EmployeePerformance } from './pages/EmployeePerformance';
 
 const getPublicFormParam = (): string | null => {
   if (typeof window === 'undefined') return null;
@@ -33,8 +33,14 @@ const getPublicFormParam = (): string | null => {
 
 const MainLayout: React.FC = () => {
   const { user, isLoading } = useAuth();
-  const [currentTab, setCurrentTab] = useState<string>('dashboard');
+  const [currentTab, setCurrentTabState] = useState<string>(() => window.location.pathname === '/employee-performance' ? 'employee-performance' : 'dashboard');
+  const setCurrentTab = (tab: string) => {
+    setCurrentTabState(tab);
+    if (tab === 'employee-performance' && window.location.pathname !== '/employee-performance') window.history.pushState({}, '', '/employee-performance');
+    else if (tab !== 'employee-performance' && window.location.pathname === '/employee-performance') window.history.pushState({}, '', '/');
+  };
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
+  const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
 
   // Search state
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -46,6 +52,12 @@ const MainLayout: React.FC = () => {
 
   // Modal triggers
   const [openLeadModalTrigger, setOpenLeadModalTrigger] = useState(false);
+
+  useEffect(() => {
+    const syncRoute = () => setCurrentTabState(window.location.pathname === '/employee-performance' ? 'employee-performance' : 'dashboard');
+    window.addEventListener('popstate', syncRoute);
+    return () => window.removeEventListener('popstate', syncRoute);
+  }, []);
 
   if (isLoading) {
     return (
@@ -85,12 +97,16 @@ const MainLayout: React.FC = () => {
         setCurrentTab={setCurrentTab}
         collapsed={sidebarCollapsed}
         setCollapsed={setSidebarCollapsed}
+        mobileOpen={mobileNavigationOpen}
+        onNavigate={() => setMobileNavigationOpen(false)}
+        onClose={() => setMobileNavigationOpen(false)}
       />
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Universal Top Header with Live Search Omnibar */}
         <Navbar
+          onOpenNavigation={() => setMobileNavigationOpen(true)}
           onSearch={handleGlobalSearch}
           openCreateLeadModal={() => {
             setCurrentTab('leads');
@@ -169,8 +185,8 @@ const MainLayout: React.FC = () => {
               }}
             />
           )}
-          {currentTab === 'forms' && <FormBuilder />}
           {currentTab === 'users' && <UsersPage />}
+          {currentTab === 'employee-performance' && <EmployeePerformance />}
         </main>
       </div>
     </div>

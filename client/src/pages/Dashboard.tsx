@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Users2,
   UserCheck,
@@ -16,7 +16,11 @@ import {
   Activity,
   Layers,
   MapPin,
-  Truck
+  Truck,
+  ChevronDown,
+  ChevronUp,
+  FileText,
+  Flame
 } from 'lucide-react';
 import { api } from '../services/api';
 import { DashboardMetrics } from '../types';
@@ -25,18 +29,62 @@ interface DashboardProps {
   onNavigate: (tab: string, filter?: string) => void;
 }
 
+type AnalyticsDateBounds = { from_date?: string; to_date?: string };
+
+function getPresetBounds(preset: string): AnalyticsDateBounds {
+  if (preset === 'all') return {};
+  const now = new Date();
+  let start: Date;
+  let end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  if (preset === 'today') start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  else if (preset === '7d') start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);
+  else if (preset === 'last_month') {
+    start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    end = new Date(now.getFullYear(), now.getMonth(), 1);
+  } else start = new Date(now.getFullYear(), now.getMonth(), 1);
+  return { from_date: start.toISOString(), to_date: end.toISOString() };
+}
+
+function getCustomBounds(from: string, to: string): AnalyticsDateBounds {
+  if (!from || !to || to < from) throw new Error('A valid custom date range is required.');
+  const [fy, fm, fd] = from.split('-').map(Number);
+  const [ty, tm, td] = to.split('-').map(Number);
+  return {
+    from_date: new Date(fy, fm - 1, fd).toISOString(),
+    to_date: new Date(ty, tm - 1, td + 1).toISOString()
+  };
+}
+
+function formatShortDate(value: string): string {
+  const [year, month, day] = value.split('-').map(Number);
+  return new Date(year, month - 1, day).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
 export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
-  const [range, setRange] = useState<string>('30d');
+  const [range, setRange] = useState<string>('this_month');
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+  const [appliedCustomRange, setAppliedCustomRange] = useState<{ from: string; to: string } | null>(null);
+  const [dateError, setDateError] = useState('');
+  const [requestError, setRequestError] = useState('');
+  const customPanelRef = useRef<HTMLDivElement>(null);
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState<boolean>(true);
+  const [funnelExpanded, setFunnelExpanded] = useState(false);
 
   const fetchAnalytics = async () => {
     setLoading(true);
     try {
-      const res = await api.getAnalytics(range);
+      setRequestError('');
+      const bounds = range === 'custom' && appliedCustomRange
+        ? getCustomBounds(appliedCustomRange.from, appliedCustomRange.to)
+        : getPresetBounds(range);
+      const res = await api.getAnalytics(bounds);
       setData(res);
     } catch (err) {
       console.error('Error fetching analytics:', err);
+      setRequestError('Dashboard data could not be loaded. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -44,7 +92,45 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
 
   useEffect(() => {
     fetchAnalytics();
-  }, [range]);
+  }, [range, appliedCustomRange]);
+
+  useEffect(() => {
+    if (!customOpen) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!customPanelRef.current?.contains(event.target as Node)) setCustomOpen(false);
+    };
+    const handleEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setCustomOpen(false); };
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [customOpen]);
+
+  const applyCustomRange = () => {
+    if (!customFrom || !customTo) {
+      setDateError('Choose both a start and end date.');
+      return;
+    }
+    if (customTo < customFrom) {
+      setDateError('End date must be on or after the start date.');
+      return;
+    }
+    setDateError('');
+    setAppliedCustomRange({ from: customFrom, to: customTo });
+    setRange('custom');
+    setCustomOpen(false);
+  };
+
+  const clearCustomRange = () => {
+    setCustomFrom('');
+    setCustomTo('');
+    setAppliedCustomRange(null);
+    setDateError('');
+    setRange('all');
+    setCustomOpen(false);
+  };
 
   const metrics: DashboardMetrics = data?.metrics || {
     totalLeads: 0,
@@ -54,11 +140,31 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
     totalRevenue: 0,
     conversionRate: '0.0'
   };
+  const funnelStages = data?.funnelOverview || [];
+  const funnelPreviewCount = Math.ceil(funnelStages.length / 2);
+  const renderFunnelStage = (stage: any) => {
+    const count = stage.lead_count || 0;
+    const maxLeads = Math.max(...funnelStages.map((item: any) => item.lead_count || 1), 1);
+    const percentage = Math.round((count / maxLeads) * 100);
+    return (
+      <div key={stage.id} className="grid grid-cols-1 sm:grid-cols-[minmax(170px,0.8fr)_minmax(120px,2fr)_auto_auto] items-center gap-x-4 gap-y-1.5 text-xs font-semibold">
+        <span className="flex items-center gap-2 text-slate-700 min-w-0">
+          <span className="w-2.5 h-2.5 rounded-full bg-emerald-600 shrink-0"></span>
+          <span className="truncate">{stage.name}</span>
+        </span>
+        <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+          <div className="h-2 rounded-full transition-all duration-500 bg-emerald-600" style={{ width: `${Math.max(percentage, 4)}%` }}></div>
+        </div>
+        <span className="text-slate-500 font-medium font-mono sm:text-right">₹{(stage.deal_value || 0).toLocaleString()}</span>
+        <span className="justify-self-start sm:justify-self-end bg-emerald-50 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded-full font-mono text-[11px] whitespace-nowrap">{count} leads</span>
+      </div>
+    );
+  };
 
   return (
     <div className="p-4 sm:p-6 max-w-7xl mx-auto space-y-6 animate-fade-in">
       {/* Top Banner & Date Filter */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight flex items-center gap-2">
             <TrendingUp className="w-6 h-6 text-emerald-600" />
@@ -70,18 +176,18 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
         </div>
 
         {/* Date Filter Pills */}
-        <div className="flex items-center gap-1.5 p-1 bg-white border border-slate-200 rounded-xl shadow-xs self-start sm:self-auto">
+        <div className="grid w-full grid-cols-3 items-stretch gap-1 p-1.5 bg-white border border-slate-200 rounded-xl shadow-xs self-start sm:flex sm:flex-wrap sm:items-center md:flex-nowrap md:w-auto xl:self-auto">
           {[
             { id: 'today', label: 'Today' },
             { id: '7d', label: 'Last 7 Days' },
-            { id: '30d', label: 'This Month' },
+            { id: 'this_month', label: 'This Month' },
             { id: 'last_month', label: 'Last Month' },
             { id: 'all', label: 'All Time' }
           ].map((item) => (
             <button
               key={item.id}
               onClick={() => setRange(item.id)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+              className={`min-h-[34px] w-full min-w-0 whitespace-nowrap px-1.5 py-2 text-[11px] rounded-lg font-semibold transition-all sm:min-h-0 sm:w-auto sm:px-3 sm:py-1.5 sm:text-xs ${
                 range === item.id
                   ? 'bg-emerald-600 text-white shadow-xs'
                   : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
@@ -90,11 +196,43 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
               {item.label}
             </button>
           ))}
+          <div className="relative w-full min-w-0 sm:ml-1 sm:w-auto" ref={customPanelRef}>
+            <button
+              type="button"
+              onClick={() => setCustomOpen((open) => !open)}
+              aria-expanded={customOpen}
+              className={`flex min-h-[34px] w-full min-w-0 items-center justify-center gap-1 px-1.5 py-2 text-[11px] whitespace-nowrap rounded-lg border font-semibold transition-colors sm:min-h-0 sm:w-auto sm:gap-2 sm:px-3 sm:py-1.5 sm:text-xs ${range === 'custom' || customOpen ? 'border-emerald-500 bg-emerald-50 text-emerald-800' : 'border-slate-200 text-slate-700 hover:border-emerald-300 hover:text-emerald-800'}`}
+            >
+              <Calendar className="w-3.5 h-3.5 shrink-0 text-emerald-700 sm:w-4 sm:h-4" />
+              <span className="min-w-0 truncate">{range === 'custom' && appliedCustomRange ? `${formatShortDate(appliedCustomRange.from)} - ${formatShortDate(appliedCustomRange.to)}` : 'Custom'}</span>
+              <ChevronDown className="w-3 h-3 shrink-0 sm:w-3.5 sm:h-3.5" />
+            </button>
+            {customOpen && (
+              <div className="absolute right-0 top-full z-30 mt-2 w-[min(340px,calc(100vw-2rem))] rounded-2xl border border-slate-200 bg-white p-4 shadow-xl">
+                <h3 className="text-sm font-bold text-slate-900 mb-3">Custom Date Range</h3>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <label className="text-xs font-semibold text-slate-700">From Date
+                    <input type="date" value={customFrom} max={customTo || undefined} onChange={(event) => { setCustomFrom(event.target.value); setDateError(''); }} className="mt-1.5 w-full rounded-lg border border-slate-300 px-2.5 py-2 text-xs text-slate-700 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100" />
+                  </label>
+                  <label className="text-xs font-semibold text-slate-700">To Date
+                    <input type="date" value={customTo} min={customFrom || undefined} onChange={(event) => { setCustomTo(event.target.value); setDateError(''); }} className="mt-1.5 w-full rounded-lg border border-slate-300 px-2.5 py-2 text-xs text-slate-700 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100" />
+                  </label>
+                </div>
+                {dateError && <p role="alert" className="mt-2 text-xs text-red-600">{dateError}</p>}
+                <div className="mt-3 flex flex-col gap-2 min-[400px]:flex-row sm:flex-row">
+                  <button type="button" onClick={applyCustomRange} className="rounded-lg bg-emerald-600 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-700">Apply</button>
+                  <button type="button" onClick={clearCustomRange} className="rounded-lg border border-emerald-500 px-4 py-2 text-xs font-bold text-emerald-800 hover:bg-emerald-50">Clear</button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
+      {requestError && <div role="alert" className="flex items-center justify-between rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"><span>{requestError}</span><button onClick={fetchAnalytics} className="font-bold underline">Retry</button></div>}
+
       {/* 4 Primary Analytics Cards (Green Theme) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-5">
+      <div className="dashboard-kpis grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-5">
         {/* 1. Total Leads */}
         <div
           onClick={() => onNavigate('leads')}
@@ -188,7 +326,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
             <span className="text-3xl font-extrabold text-slate-900">
               {loading ? '...' : metrics.totalOrders}
             </span>
-            <span className="text-xs text-emerald-700 font-bold font-mono">
+            <span className="text-lg text-emerald-700 font-bold font-mono">
               ₹{(metrics.totalRevenue || 0).toLocaleString()} Rev
             </span>
           </div>
@@ -200,135 +338,146 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
         </div>
       </div>
 
-      {/* Sales Funnel Overview & Overdue Reminders Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Sales Funnel Pipeline Stage Summary (2 cols) */}
-        <div className="lg:col-span-2 bg-white p-6 rounded-2xl border border-slate-200/80 shadow-xs">
-          <div className="flex items-center justify-between mb-4">
+      {/* Follow-ups and funnel sections, stacked at full dashboard width */}
+      <div className="space-y-3">
+        <section className="w-full bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs">
+          <div className="flex items-center justify-between gap-4 mb-3">
+            <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+              <Clock className="w-4 h-4 text-emerald-600" />
+              Follow-ups & Reminders
+            </h2>
+            <button onClick={() => onNavigate('followups')} className="shrink-0 text-xs font-bold text-emerald-700 hover:text-emerald-800">
+              View All
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 mb-4">
+            {[
+              { label: 'Total Calls', metric: 'totalCalls', value: data?.followUpStats?.totalCalls, detail: 'Calls logged in this date range', icon: PhoneCall, tone: 'emerald', action: 'followups' },
+              { label: 'New Leads', metric: 'newLeads', value: data?.followUpStats?.newLeads, detail: 'Leads created in this date range', icon: UserCheck, tone: 'sky', action: 'leads' },
+              { label: 'Paid Orders', metric: 'paidOrders', value: data?.followUpStats?.paidOrders, detail: 'Orders marked paid in this date range', icon: FileText, tone: 'violet', action: 'orders' },
+              { label: 'Hot Leads', metric: 'hotLeads', value: data?.followUpStats?.hotLeads, detail: 'Open leads with high or urgent priority', icon: Flame, tone: 'rose', action: 'leads' }
+            ].map((stat) => {
+              const Icon = stat.icon;
+              const currentValue = Number(stat.value ?? 0);
+              const previousValue = data?.followUpStats?.previous?.[stat.metric];
+              const change = previousValue === undefined || previousValue === null
+                ? null
+                : previousValue === 0
+                  ? currentValue === 0 ? 0 : 100
+                  : Math.round(((currentValue - previousValue) / previousValue) * 100);
+              const trendLabel = change === null ? '' : `${change > 0 ? '+' : ''}${change}%`;
+              const palette = {
+                emerald: { card: 'border-emerald-100 bg-gradient-to-br from-emerald-50 to-white', icon: 'bg-emerald-100 text-emerald-700' },
+                sky: { card: 'border-sky-100 bg-gradient-to-br from-sky-50 to-white', icon: 'bg-sky-100 text-sky-700' },
+                violet: { card: 'border-violet-100 bg-gradient-to-br from-violet-50 to-white', icon: 'bg-violet-100 text-violet-700' },
+                rose: { card: 'border-rose-100 bg-gradient-to-br from-rose-50 to-white', icon: 'bg-rose-100 text-rose-700' }
+              }[stat.tone]!;
+              return (
+                <button key={stat.label} type="button" onClick={() => onNavigate(stat.action)} className={`group flex min-h-[104px] min-w-0 items-center gap-3 rounded-2xl border p-3.5 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md ${palette.card}`}>
+                  <span className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl ${palette.icon}`}>
+                    <Icon className="h-5 w-5" strokeWidth={2.5} />
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block text-[11px] font-bold uppercase tracking-wide text-slate-600">{stat.label}</span>
+                    <span className="flex items-center gap-2">
+                      <span className="text-[28px] font-extrabold leading-8 text-slate-950">{loading ? '...' : stat.value ?? 0}</span>
+                      {!loading && data?.followUpStats?.hasComparison && change !== null && (
+                        <span title="Compared with the previous period of equal length" className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] font-bold ${change > 0 ? 'bg-emerald-100 text-emerald-700' : change < 0 ? 'bg-rose-100 text-rose-700' : 'bg-slate-100 text-slate-600'}`}>
+                          {change > 0 ? '↑' : change < 0 ? '↓' : '↔'} {trendLabel}
+                        </span>
+                      )}
+                    </span>
+                    <span className="block truncate text-[11px] font-medium text-slate-600">{stat.detail}</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          {data?.overdueFollowUps?.length > 0 && (
+            <div className="p-2.5 sm:px-3.5 mb-3 rounded-xl bg-red-50 border border-red-200 flex items-center gap-3">
+              <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+              <div>
+                <h4 className="text-xs font-bold text-red-800">{data.overdueFollowUps.length} Overdue Follow-up(s)</h4>
+                <p className="text-[11px] text-red-600">Needs immediate attention.</p>
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-1.5">
+            {[...(data?.overdueFollowUps || []), ...(data?.upcomingFollowUps || [])].slice(0, 4).map((fup: any) => {
+              const isOverdue = new Date(fup.scheduled_at) < new Date();
+              return (
+                <div key={fup.id} onClick={() => onNavigate('followups')} className="px-3 py-2 rounded-xl border border-slate-100 hover:border-emerald-200 bg-slate-50/60 hover:bg-white transition-all cursor-pointer">
+                  <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1.25fr)_minmax(155px,0.8fr)_minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1.5">
+                    <div className="min-w-0">
+                      <h3 className="text-xs font-bold text-slate-900 truncate">{fup.lead_name || fup.customer_name || 'Follow-up'}</h3>
+                      <p className="text-[11px] text-slate-600 truncate">{fup.purpose || 'Follow-up reminder'}</p>
+                    </div>
+                    <span className="text-[11px] text-slate-500">{new Date(fup.scheduled_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+                    <span className="text-[11px] text-slate-500 truncate">Agent: {fup.agent_name || 'Assigned'}</span>
+                    <span className={`justify-self-start md:justify-self-end shrink-0 text-[10px] font-bold px-2.5 py-1 rounded-full ${isOverdue ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-800'}`}>
+                      {isOverdue ? 'Overdue' : 'Upcoming'}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+            {!loading && [...(data?.overdueFollowUps || []), ...(data?.upcomingFollowUps || [])].length === 0 && (
+              <div className="rounded-xl border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500">No follow-ups or reminders for this date range.</div>
+            )}
+          </div>
+
+          <button onClick={() => onNavigate('followups')} className="w-full mt-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all">
+            Manage All Scheduled Tasks
+          </button>
+        </section>
+
+        <section className="w-full bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs">
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 mb-3">
             <div>
               <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
                 <Layers className="w-4 h-4 text-emerald-600" />
                 Sales Funnel & Stage Breakdown
               </h2>
-              <p className="text-xs text-slate-500">Current active leads and pipeline distribution.</p>
+              <p className="text-xs text-slate-500 mt-0.5">Current active leads and pipeline distribution.</p>
             </div>
-            <button
-              onClick={() => onNavigate('pipeline')}
-              className="text-xs font-bold text-emerald-700 hover:text-emerald-800 flex items-center gap-1"
-            >
+            <button onClick={() => onNavigate('pipeline')} className="self-start text-xs font-bold text-emerald-700 hover:text-emerald-800 flex items-center gap-1">
               Open Kanban <ChevronRight className="w-3.5 h-3.5" />
             </button>
           </div>
 
-          <div className="space-y-3 mt-4">
-            {data?.funnelOverview?.map((stage: any) => {
-              const count = stage.lead_count || 0;
-              const maxLeads = Math.max(...(data.funnelOverview.map((s: any) => s.lead_count || 1)), 1);
-              const percentage = Math.round((count / maxLeads) * 100);
-
-              return (
-                <div key={stage.id} className="space-y-1">
-                  <div className="flex items-center justify-between text-xs font-semibold">
-                    <span className="flex items-center gap-2 text-slate-700">
-                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-600"></span>
-                      {stage.name}
-                    </span>
-                    <div className="flex items-center gap-3">
-                      <span className="text-slate-500 font-medium font-mono">₹{(stage.deal_value || 0).toLocaleString()}</span>
-                      <span className="bg-emerald-50 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded-full font-mono text-[11px]">
-                        {count} leads
-                      </span>
-                    </div>
-                  </div>
-                  <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
-                    <div
-                      className="h-2 rounded-full transition-all duration-500 bg-emerald-600"
-                      style={{
-                        width: `${Math.max(percentage, 4)}%`
-                      }}
-                    ></div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Upcoming & Overdue Reminders (1 col) */}
-        <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-xs flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                <Clock className="w-4 h-4 text-emerald-600" />
-                Follow-ups & Reminders
-              </h2>
-              <button
-                onClick={() => onNavigate('followups')}
-                className="text-xs font-bold text-emerald-700 hover:text-emerald-800"
+          <div className="space-y-2">
+            {funnelStages.slice(0, funnelPreviewCount).map(renderFunnelStage)}
+            {funnelStages.length > funnelPreviewCount && (
+              <div
+                className="grid transition-[grid-template-rows] duration-300 ease-in-out"
+                style={{ gridTemplateRows: funnelExpanded ? '1fr' : '0fr' }}
+                aria-hidden={!funnelExpanded}
               >
-                View All
-              </button>
-            </div>
-
-            {/* Overdue Alert banner */}
-            {data?.overdueFollowUps?.length > 0 ? (
-              <div className="p-3 mb-4 rounded-xl bg-red-50 border border-red-200 flex items-start gap-2.5">
-                <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
-                <div>
-                  <h4 className="text-xs font-bold text-red-800">
-                    {data.overdueFollowUps.length} Overdue Follow-up(s)
-                  </h4>
-                  <p className="text-[11px] text-red-600 mt-0.5">
-                    Needs immediate attention.
-                  </p>
+                <div className="min-h-0 overflow-hidden space-y-2">
+                  {funnelStages.slice(funnelPreviewCount).map(renderFunnelStage)}
                 </div>
               </div>
-            ) : null}
-
-            {/* List */}
-            <div className="space-y-3">
-              {[...(data?.overdueFollowUps || []), ...(data?.upcomingFollowUps || [])].slice(0, 4).map((fup: any) => {
-                const isOverdue = new Date(fup.scheduled_at) < new Date();
-                return (
-                  <div
-                    key={fup.id}
-                    onClick={() => onNavigate('followups')}
-                    className="p-3 rounded-xl border border-slate-100 hover:border-emerald-200 bg-slate-50/60 hover:bg-white transition-all cursor-pointer"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-slate-800 truncate">
-                        {fup.lead_name || fup.customer_name || 'Follow-up'}
-                      </span>
-                      <span
-                        className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                          isOverdue ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-800'
-                        }`}
-                      >
-                        {isOverdue ? 'Overdue' : 'Upcoming'}
-                      </span>
-                    </div>
-                    <div className="text-[11px] text-slate-500 mt-1 truncate">
-                      {fup.purpose}
-                    </div>
-                    <div className="text-[10px] text-slate-400 mt-1 flex items-center justify-between">
-                      <span>{new Date(fup.scheduled_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
-                      <span>Agent: {fup.agent_name || 'Assigned'}</span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+            )}
+            {!loading && funnelStages.length === 0 && (
+              <div className="rounded-xl border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500">No funnel stages available.</div>
+            )}
           </div>
-
-          <button
-            onClick={() => onNavigate('followups')}
-            className="w-full mt-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all"
-          >
-            Manage All Scheduled Tasks
-          </button>
-        </div>
+          {funnelStages.length > funnelPreviewCount && (
+            <button
+              type="button"
+              aria-expanded={funnelExpanded}
+              onClick={() => setFunnelExpanded((expanded) => !expanded)}
+              className="mx-auto mt-3 flex items-center justify-center gap-1 rounded-lg px-3 py-1.5 text-xs font-bold text-emerald-700 transition-colors hover:bg-emerald-50 hover:text-emerald-800"
+            >
+              {funnelExpanded ? 'Show Less' : 'Show More'}
+              {funnelExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+            </button>
+          )}
+        </section>
       </div>
-
       {/* Lead Sources & Agent Performance Leaderboard */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Lead Source Performance */}
@@ -415,7 +564,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
                 <th className="py-2.5 px-3">Product / Service</th>
                 <th className="py-2.5 px-3">Amount</th>
                 <th className="py-2.5 px-3">Status</th>
-                <th className="py-2.5 px-3">Route Journey (Start ➔ Current ➔ End)</th>
+                <th className="py-2.5 px-3">Route Journey (Start Ã¢Å¾â€ Current Ã¢Å¾â€ End)</th>
                 <th className="py-2.5 px-3 text-right">Actions</th>
               </tr>
             </thead>
@@ -437,7 +586,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
                   <td className="py-3 px-3">
                     <div className="flex items-center gap-1 text-[11px] max-w-[260px] truncate text-slate-600">
                       <span className="truncate">{ord.start_location || 'Origin'}</span>
-                      <span className="text-emerald-700 font-bold">➔ [{ord.current_location}] ➔</span>
+                      <span className="text-emerald-700 font-bold">Ã¢Å¾â€ [{ord.current_location}] Ã¢Å¾â€</span>
                       <span className="truncate">{ord.end_location || 'Destination'}</span>
                     </div>
                   </td>

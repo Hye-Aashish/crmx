@@ -145,10 +145,16 @@ export interface Order {
   customer_code?: string;
   customer_email?: string;
   customer_address?: string;
+  customer_city?: string;
+  current_customer_name?: string;
+  current_customer_phone?: string;
   order_date: string;
   product_name: string;
   quantity: number;
   order_amount: number;
+  payment_method?: string | null;
+  deposit?: number | null;
+  shipping_date?: string | null;
   payment_status: 'Pending' | 'Partial' | 'Paid' | 'Refunded';
   order_status: string;
   start_location: string;

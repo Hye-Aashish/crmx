@@ -17,6 +17,12 @@ function generateCode(prefix: string, table: string, column: string): string {
   return code;
 }
 
+function isValidCalendarDate(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
 function logAudit(userId: string | undefined, userName: string | undefined, action: string, entityType: string, entityId: string | string[], details: string) {
   try {
     const id = `aud-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
@@ -514,9 +520,11 @@ export const getLeads = (req: AuthenticatedRequest, res: Response) => {
 
   query += ` ORDER BY l.created_at DESC`;
 
-  const offset = (Number(page) - 1) * Number(limit);
+  const currentPage = Math.max(1, Number.parseInt(String(page), 10) || 1);
+  const pageLimit = Math.min(500, Math.max(1, Number.parseInt(String(limit), 10) || 50));
+  const offset = (currentPage - 1) * pageLimit;
   const pagedQuery = `${query} LIMIT ? OFFSET ?`;
-  const pagedParams = [...params, Number(limit), offset];
+  const pagedParams = [...params, pageLimit, offset];
 
   const leads = db.prepare(pagedQuery).all(...pagedParams);
   const totalCount = db.prepare(`SELECT count(*) as total FROM (${query})`).get(...params) as { total: number };
@@ -525,9 +533,9 @@ export const getLeads = (req: AuthenticatedRequest, res: Response) => {
     data: leads,
     pagination: {
       total: totalCount.total,
-      page: Number(page),
-      limit: Number(limit),
-      totalPages: Math.ceil(totalCount.total / Number(limit))
+      page: currentPage,
+      limit: pageLimit,
+      totalPages: Math.ceil(totalCount.total / pageLimit)
     }
   });
 };
@@ -1119,10 +1127,20 @@ export const updateCustomer = (req: AuthenticatedRequest, res: Response) => {
 
 // ================= ORDERS & MANUAL TRACKING CONTROLLERS =================
 export const getOrders = (req: AuthenticatedRequest, res: Response) => {
-  const { search, customer_id, order_status, payment_status, phone, from_date, to_date, page = 1, limit = 50 } = req.query;
+  const {
+    search, customer_name, customer_id, order_status, payment_status, payment_method, phone,
+    created_from, created_to_exclusive,
+    from_date, to_date, shipping_from, shipping_to, page = 1, limit = 50
+  } = req.query;
 
   let query = `
-    SELECT o.*, c.customer_code, u.name as assigned_staff_name
+    SELECT o.*, c.customer_code,
+      c.name as current_customer_name,
+      c.email as customer_email,
+      c.phone as current_customer_phone,
+      c.address as customer_address,
+      c.city as customer_city,
+      u.name as assigned_staff_name
     FROM orders o
     LEFT JOIN customers c ON o.customer_id = c.id
     LEFT JOIN users u ON o.assigned_staff_id = u.id
@@ -1140,7 +1158,11 @@ export const getOrders = (req: AuthenticatedRequest, res: Response) => {
   }
   if (payment_status) {
     query += ` AND o.payment_status = ?`;
-    params.push(payment_status);
+    params.push(payment_status === 'Partially Paid' ? 'Partial' : payment_status);
+  }
+  if (payment_method) {
+    query += ` AND o.payment_method = ?`;
+    params.push(payment_method);
   }
   if (phone) {
     const pNorm = normalizePhone(String(phone));
@@ -1155,21 +1177,48 @@ export const getOrders = (req: AuthenticatedRequest, res: Response) => {
     query += ` AND date(o.order_date) <= date(?)`;
     params.push(to_date);
   }
+  if (shipping_from) {
+    query += ` AND date(o.shipping_date) >= date(?)`;
+    params.push(shipping_from);
+  }
+  if (shipping_to) {
+    query += ` AND date(o.shipping_date) <= date(?)`;
+    params.push(shipping_to);
+  }
+  if (created_from) {
+    query += ` AND datetime(o.order_date) >= datetime(?)`;
+    params.push(created_from);
+  }
+  if (created_to_exclusive) {
+    query += ` AND datetime(o.order_date) < datetime(?)`;
+    params.push(created_to_exclusive);
+  }
+  if (customer_name) {
+    query += ` AND LOWER(COALESCE(c.name, o.customer_name, '')) LIKE LOWER(?)`;
+    params.push(`%${String(customer_name).trim()}%`);
+  }
   if (search) {
     const s = `%${search}%`;
     const sNorm = `%${normalizePhone(String(search))}%`;
     query += ` AND (
+      o.id LIKE ?
+      OR
       o.order_code LIKE ?
       OR o.customer_name LIKE ?
+      OR c.name LIKE ?
+      OR c.email LIKE ?
       OR o.product_name LIKE ?
       OR o.start_location LIKE ?
       OR o.current_location LIKE ?
       OR o.end_location LIKE ?
       OR c.customer_code LIKE ?
+      OR c.address LIKE ?
+      OR c.city LIKE ?
+      OR c.phone LIKE ?
       OR o.customer_phone LIKE ?
       OR o.customer_phone_normalized LIKE ?
     )`;
-    params.push(s, s, s, s, s, s, s, s, sNorm);
+    params.push(s, s, s, s, s, s, s, s, s, s, s, s, s, s, sNorm);
   }
 
   query += ` ORDER BY o.order_date DESC`;
@@ -1180,9 +1229,20 @@ export const getOrders = (req: AuthenticatedRequest, res: Response) => {
 
   const orders = db.prepare(pagedQuery).all(...pagedParams);
   const totalCount = db.prepare(`SELECT count(*) as total FROM (${query})`).get(...params) as { total: number };
+  const summary = db.prepare(`
+    SELECT
+      COUNT(*) as total_orders,
+      SUM(CASE WHEN order_status IN ('Dispatched', 'In Transit', 'Reached Local Hub', 'Out for Delivery') THEN 1 ELSE 0 END) as in_transit_orders,
+      SUM(CASE WHEN order_status = 'Delivered' THEN 1 ELSE 0 END) as delivered_orders,
+      COALESCE(SUM(order_amount), 0) as total_order_volume,
+      COALESCE(SUM(COALESCE(deposit, 0)), 0) as total_deposits,
+      COALESCE(SUM(MAX(order_amount - COALESCE(deposit, 0), 0)), 0) as total_due_balance
+    FROM orders
+  `).get() as any;
 
   return res.json({
     data: orders,
+    summary,
     pagination: {
       total: totalCount.total,
       page: Number(page),
@@ -1195,7 +1255,13 @@ export const getOrders = (req: AuthenticatedRequest, res: Response) => {
 export const getOrderById = (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
   const order = db.prepare(`
-    SELECT o.*, c.customer_code, c.email as customer_email, c.address as customer_address, u.name as assigned_staff_name
+    SELECT o.*, c.customer_code,
+      c.name as current_customer_name,
+      c.email as customer_email,
+      c.phone as current_customer_phone,
+      c.address as customer_address,
+      c.city as customer_city,
+      u.name as assigned_staff_name
     FROM orders o
     LEFT JOIN customers c ON o.customer_id = c.id
     LEFT JOIN users u ON o.assigned_staff_id = u.id
@@ -1220,19 +1286,51 @@ export const createOrder = (req: AuthenticatedRequest, res: Response) => {
     product_name,
     quantity,
     order_amount,
-    payment_status,
+    payment_method,
+    deposit,
     order_status,
     start_location,
     current_location,
     end_location,
     expected_delivery_date,
     delivery_notes,
+    shipping_date,
     assigned_staff_id
   } = req.body;
 
-  if (!customer_id || !product_name || order_amount === undefined) {
+  if (!customer_id || typeof product_name !== 'string' || !product_name.trim() || order_amount === undefined) {
     return res.status(400).json({ error: 'Customer ID, product name, and order amount are required' });
   }
+
+  const totalAmount = Number(order_amount);
+  const depositAmount = deposit === undefined || deposit === null || deposit === '' ? 0 : Number(deposit);
+  const orderQuantity = Number(quantity ?? 1);
+  const allowedPaymentMethods = ['Cash', 'UPI', 'Card', 'Bank Transfer', 'Other'];
+  if (!Number.isFinite(totalAmount) || totalAmount < 0) {
+    return res.status(400).json({ error: 'Order amount must be a valid non-negative number' });
+  }
+  if (!Number.isFinite(orderQuantity) || !Number.isInteger(orderQuantity) || orderQuantity < 1) {
+    return res.status(400).json({ error: 'Quantity must be a positive whole number' });
+  }
+  if (!Number.isFinite(depositAmount) || depositAmount < 0 || depositAmount > totalAmount) {
+    return res.status(400).json({ error: 'Deposit must be between zero and the order amount' });
+  }
+  if (payment_method && !allowedPaymentMethods.includes(String(payment_method))) {
+    return res.status(400).json({ error: 'Payment method is invalid' });
+  }
+  if (shipping_date && !isValidCalendarDate(shipping_date)) {
+    return res.status(400).json({ error: 'Shipping date must be a valid calendar date' });
+  }
+  const allowedStatuses = ['Order Placed', 'Processing', 'Confirmed', 'Dispatched', 'In Transit', 'Reached Local Hub', 'Out for Delivery', 'Delivered', 'On Hold', 'Cancelled'];
+  if (order_status && !allowedStatuses.includes(String(order_status))) {
+    return res.status(400).json({ error: 'Order status is invalid' });
+  }
+  if (end_location !== undefined && (typeof end_location !== 'string' || end_location.length > 500)) {
+    return res.status(400).json({ error: 'Delivery location must be text under 500 characters' });
+  }
+  const paymentStatus = totalAmount > 0 && depositAmount >= totalAmount
+    ? 'Paid'
+    : depositAmount > 0 ? 'Partial' : 'Pending';
 
   const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(customer_id) as any;
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
@@ -1251,10 +1349,10 @@ export const createOrder = (req: AuthenticatedRequest, res: Response) => {
     db.prepare(`
       INSERT INTO orders (
         id, order_code, customer_id, customer_name, customer_phone, customer_phone_normalized,
-        product_name, quantity, order_amount, payment_status, order_status,
+        product_name, quantity, order_amount, payment_status, payment_method, deposit, shipping_date, order_status,
         start_location, current_location, end_location,
         expected_delivery_date, delivery_notes, assigned_staff_id, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       order_code,
@@ -1262,10 +1360,13 @@ export const createOrder = (req: AuthenticatedRequest, res: Response) => {
       customer.name,
       customer.phone,
       customer.phone_normalized,
-      product_name,
-      Number(quantity) || 1,
-      Number(order_amount),
-      payment_status || 'Pending',
+      product_name.trim(),
+      orderQuantity,
+      totalAmount,
+      paymentStatus,
+      payment_method || null,
+      depositAmount,
+      shipping_date || null,
       initialStatus,
       initialStartLocation,
       initialLocation,
@@ -1300,7 +1401,7 @@ export const createOrder = (req: AuthenticatedRequest, res: Response) => {
         latest_order_status = ?,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).run(Number(order_amount), initialStatus, customer.id);
+    `).run(totalAmount, initialStatus, customer.id);
   });
 
   orderTx();
@@ -1309,10 +1410,62 @@ export const createOrder = (req: AuthenticatedRequest, res: Response) => {
   return res.status(201).json({ message: 'Order created successfully', id, order_code });
 };
 
+export const updateOrder = (req: AuthenticatedRequest, res: Response) => {
+  const { id } = req.params;
+  const {
+    product_name,
+    quantity,
+    order_amount,
+    payment_method,
+    deposit,
+    shipping_date,
+    end_location
+  } = req.body;
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id) as any;
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+
+  const name = typeof product_name === 'string' ? product_name.trim() : '';
+  const qty = Number(quantity);
+  const total = Number(order_amount);
+  const paid = deposit === null || deposit === '' ? 0 : Number(deposit);
+  const method = payment_method === '' || payment_method === null ? null : String(payment_method);
+  const allowedMethods = ['Cash', 'UPI', 'Card', 'Bank Transfer', 'Other'];
+  if (!name) return res.status(400).json({ error: 'Product or service name is required' });
+  if (!Number.isInteger(qty) || qty < 1) return res.status(400).json({ error: 'Quantity must be a positive whole number' });
+  if (!Number.isFinite(total) || total < 0) return res.status(400).json({ error: 'Total payment must be a valid non-negative amount' });
+  if (!Number.isFinite(paid) || paid < 0 || paid > total) {
+    return res.status(400).json({ error: 'Deposit must be between zero and the total payment' });
+  }
+  if (method && !allowedMethods.includes(method)) return res.status(400).json({ error: 'Payment method is invalid' });
+  if (shipping_date && !isValidCalendarDate(shipping_date)) {
+    return res.status(400).json({ error: 'Shipping date must be a valid calendar date' });
+  }
+
+  const paymentStatus = total > 0 && paid >= total ? 'Paid' : paid > 0 ? 'Partial' : 'Pending';
+  const destination = typeof end_location === 'string' ? end_location.trim() : order.end_location;
+  const delta = total - Number(order.order_amount || 0);
+  const updateTx = db.transaction(() => {
+    db.prepare(`
+      UPDATE orders SET
+        product_name = ?, quantity = ?, order_amount = ?, payment_method = ?, deposit = ?,
+        payment_status = ?, shipping_date = ?, end_location = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(name, qty, total, method, paid, paymentStatus, shipping_date || null, destination || null, id);
+    db.prepare(`
+      UPDATE customers SET total_order_value = MAX(0, total_order_value + ?), updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(delta, order.customer_id);
+  });
+  updateTx();
+  logAudit(req.user?.id, req.user?.name, 'UPDATE_ORDER', 'order', id, `Updated order details and payment for ${order.order_code}`);
+
+  return res.json({ message: 'Order updated successfully' });
+};
+
 // MANUAL LOCATION & STATUS UPDATE CONTROLLER (Supports 3 locations and tracking history)
 export const updateOrderLocationAndStatus = (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
-  const { current_location, start_location, end_location, order_status, remarks, payment_status } = req.body;
+  const { current_location, start_location, end_location, order_status, remarks } = req.body;
 
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id) as any;
   if (!order) return res.status(404).json({ error: 'Order not found' });
@@ -1320,6 +1473,14 @@ export const updateOrderLocationAndStatus = (req: AuthenticatedRequest, res: Res
   const newStartLocation = (start_location !== undefined && String(start_location).trim()) ? String(start_location).trim() : (order.start_location || 'Central Origin Hub');
   const newEndLocation = (end_location !== undefined && String(end_location).trim()) ? String(end_location).trim() : (order.end_location || 'Customer Delivery Address');
   const newStatus = order_status || order.order_status;
+  const allowedStatuses = ['Order Placed', 'Processing', 'Confirmed', 'Dispatched', 'In Transit', 'Reached Local Hub', 'Out for Delivery', 'Delivered', 'On Hold', 'Cancelled'];
+  if (!allowedStatuses.includes(newStatus)) return res.status(400).json({ error: 'Order status is invalid' });
+  if ([current_location, start_location, end_location].some(value => value !== undefined && (typeof value !== 'string' || value.length > 500))) {
+    return res.status(400).json({ error: 'Tracking locations must be text under 500 characters' });
+  }
+  if (remarks !== undefined && (typeof remarks !== 'string' || remarks.length > 2000)) {
+    return res.status(400).json({ error: 'Tracking remarks must be text under 2,000 characters' });
+  }
 
   // If status is Delivered and no specific current_location was given, it is at destination
   let newLocation = (current_location && String(current_location).trim()) ? String(current_location).trim() : order.current_location;
@@ -1327,7 +1488,7 @@ export const updateOrderLocationAndStatus = (req: AuthenticatedRequest, res: Res
     newLocation = newEndLocation;
   }
 
-  const newPayment = payment_status || order.payment_status;
+  const newPayment = order.payment_status;
 
   const updateTx = db.transaction(() => {
     // 1. Update order
@@ -1635,18 +1796,32 @@ export const globalSearch = (req: AuthenticatedRequest, res: Response) => {
 
 // ================= DASHBOARD & ANALYTICS CONTROLLER =================
 export const getAnalytics = (req: AuthenticatedRequest, res: Response) => {
-  const { range = '30d' } = req.query; // today, 7d, 30d, last_month, all
-
-  let dateFilter = '';
-  if (range === 'today') {
-    dateFilter = "AND date(created_at) = date('now')";
-  } else if (range === '7d') {
-    dateFilter = "AND date(created_at) >= date('now', '-7 days')";
-  } else if (range === '30d') {
-    dateFilter = "AND date(created_at) >= date('now', '-30 days')";
-  } else if (range === 'last_month') {
-    dateFilter = "AND strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now', '-1 month')";
+  const { range = 'all' } = req.query;
+  const parseDateBound = (value: unknown): string | undefined => {
+    if (typeof value !== 'string' || !value) return undefined;
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
+  };
+  let fromDate = parseDateBound(req.query.from_date);
+  let toDate = parseDateBound(req.query.to_date);
+  if ((req.query.from_date && !fromDate) || (req.query.to_date && !toDate)) {
+    return res.status(400).json({ error: 'Invalid analytics date range.' });
   }
+  if (fromDate && toDate && fromDate >= toDate) {
+    return res.status(400).json({ error: 'The end date must be after the start date.' });
+  }
+
+  const buildDateFilter = (column: string) => {
+    const clauses: string[] = [];
+    if (fromDate) clauses.push(`AND datetime(${column}) >= datetime('${fromDate}')`);
+    if (toDate) clauses.push(`AND datetime(${column}) < datetime('${toDate}')`);
+    if (!fromDate && !toDate && range === 'today') clauses.push(`AND date(${column}) = date('now', 'localtime')`);
+    if (!fromDate && !toDate && range === '7d') clauses.push(`AND date(${column}) >= date('now', 'localtime', '-6 days') AND date(${column}) <= date('now', 'localtime')`);
+    if (!fromDate && !toDate && range === '30d') clauses.push(`AND date(${column}) >= date('now', 'localtime', '-29 days') AND date(${column}) <= date('now', 'localtime')`);
+    if (!fromDate && !toDate && range === 'last_month') clauses.push(`AND strftime('%Y-%m', ${column}, 'localtime') = strftime('%Y-%m', 'now', 'localtime', '-1 month')`);
+    return clauses.join(' ');
+  };
+  const dateFilter = buildDateFilter('created_at');
 
   // 1. Total Leads
   const totalLeadsRow = db.prepare(`SELECT count(*) as count FROM leads WHERE 1=1 ${dateFilter}`).get() as { count: number };
@@ -1666,19 +1841,47 @@ export const getAnalytics = (req: AuthenticatedRequest, res: Response) => {
   const convertedLeads = convertedLeadsRow.count;
 
   // 4. Total Orders
-  const orderDateFilter = dateFilter.replace(/created_at/g, 'order_date');
+  const orderDateFilter = buildDateFilter('order_date');
   const totalOrdersRow = db.prepare(`SELECT count(*) as count, COALESCE(SUM(order_amount), 0) as total_revenue FROM orders WHERE 1=1 ${orderDateFilter}`).get() as { count: number; total_revenue: number };
   const totalOrders = totalOrdersRow.count;
   const totalRevenue = totalOrdersRow.total_revenue;
 
+  const totalCalls = (db.prepare(`
+    SELECT COUNT(*) as count FROM lead_activities
+    WHERE activity_type = 'call' ${buildDateFilter('created_at')}
+  `).get() as { count: number }).count;
+  const paidOrders = (db.prepare(`
+    SELECT COUNT(*) as count FROM orders
+    WHERE payment_status = 'Paid' ${orderDateFilter}
+  `).get() as { count: number }).count;
+  const hotLeads = (db.prepare(`
+    SELECT COUNT(*) as count FROM leads
+    WHERE is_converted = 0 AND priority IN ('High', 'Urgent') ${dateFilter}
+  `).get() as { count: number }).count;
+
+  const hasComparison = Boolean(fromDate && toDate);
+  let previousFollowUpStats: { totalCalls: number; newLeads: number; paidOrders: number; hotLeads: number } | null = null;
+  if (fromDate && toDate) {
+    const periodLength = new Date(toDate).getTime() - new Date(fromDate).getTime();
+    const previousFrom = new Date(new Date(fromDate).getTime() - periodLength).toISOString();
+    const previousTo = fromDate;
+    const previousDateFilter = (column: string) => `AND datetime(${column}) >= datetime('${previousFrom}') AND datetime(${column}) < datetime('${previousTo}')`;
+    previousFollowUpStats = {
+      totalCalls: (db.prepare(`SELECT COUNT(*) as count FROM lead_activities WHERE activity_type = 'call' ${previousDateFilter('created_at')}`).get() as { count: number }).count,
+      newLeads: (db.prepare(`SELECT COUNT(*) as count FROM leads WHERE 1=1 ${previousDateFilter('created_at')}`).get() as { count: number }).count,
+      paidOrders: (db.prepare(`SELECT COUNT(*) as count FROM orders WHERE payment_status = 'Paid' ${previousDateFilter('order_date')}`).get() as { count: number }).count,
+      hotLeads: (db.prepare(`SELECT COUNT(*) as count FROM leads WHERE is_converted = 0 AND priority IN ('High', 'Urgent') ${previousDateFilter('created_at')}`).get() as { count: number }).count
+    };
+  }
+
   // Lead Conversion Rate
   const conversionRate = totalLeads > 0 ? ((convertedLeads / totalLeads) * 100).toFixed(1) : '0.0';
 
-  // Leads Generated Over Time (Last 14 days)
+  // Lead activity and distribution follow the selected dashboard date window.
   const leadsOverTime = db.prepare(`
     SELECT date(created_at) as date, count(*) as count
     FROM leads
-    WHERE date(created_at) >= date('now', '-14 days')
+    WHERE 1=1 ${dateFilter}
     GROUP BY date(created_at)
     ORDER BY date ASC
   `).all();
@@ -1713,7 +1916,7 @@ export const getAnalytics = (req: AuthenticatedRequest, res: Response) => {
       COUNT(l.id) as lead_count,
       COALESCE(SUM(l.estimated_deal_value), 0) as deal_value
     FROM funnel_stages fs
-    LEFT JOIN leads l ON l.stage_id = fs.id AND l.is_converted = 0
+    LEFT JOIN leads l ON l.stage_id = fs.id AND l.is_converted = 0 ${dateFilter.replace(/created_at/g, 'l.created_at')}
     WHERE fs.is_active = 1
     GROUP BY fs.id
     ORDER BY fs.order_index ASC
@@ -1725,7 +1928,7 @@ export const getAnalytics = (req: AuthenticatedRequest, res: Response) => {
     FROM follow_ups f
     LEFT JOIN leads l ON f.lead_id = l.id
     LEFT JOIN users u ON f.assigned_user_id = u.id
-    WHERE f.scheduled_at < datetime('now') AND f.status = 'pending'
+    WHERE f.scheduled_at < datetime('now') AND f.status = 'pending' ${buildDateFilter('f.scheduled_at')}
     ORDER BY f.scheduled_at ASC
     LIMIT 5
   `).all();
@@ -1735,7 +1938,7 @@ export const getAnalytics = (req: AuthenticatedRequest, res: Response) => {
     FROM follow_ups f
     LEFT JOIN leads l ON f.lead_id = l.id
     LEFT JOIN users u ON f.assigned_user_id = u.id
-    WHERE f.scheduled_at >= datetime('now') AND f.status = 'pending'
+    WHERE f.scheduled_at >= datetime('now') AND f.status = 'pending' ${buildDateFilter('f.scheduled_at')}
     ORDER BY f.scheduled_at ASC
     LIMIT 5
   `).all();
@@ -1754,6 +1957,7 @@ export const getAnalytics = (req: AuthenticatedRequest, res: Response) => {
     SELECT o.*, c.customer_code
     FROM orders o
     LEFT JOIN customers c ON o.customer_id = c.id
+    WHERE 1=1 ${orderDateFilter}
     ORDER BY o.order_date DESC
     LIMIT 6
   `).all();
@@ -1767,6 +1971,14 @@ export const getAnalytics = (req: AuthenticatedRequest, res: Response) => {
       totalRevenue,
       conversionRate
     },
+    followUpStats: {
+      totalCalls,
+      newLeads: totalLeads,
+      paidOrders,
+      hotLeads,
+      previous: previousFollowUpStats,
+      hasComparison
+    },
     leadsOverTime,
     sourcePerformance,
     agentPerformance,
@@ -1775,6 +1987,105 @@ export const getAnalytics = (req: AuthenticatedRequest, res: Response) => {
     upcomingFollowUps,
     recentActivities,
     recentOrders
+  });
+};
+
+// ================= EMPLOYEE PERFORMANCE =================
+export const getEmployeePerformance = (req: AuthenticatedRequest, res: Response) => {
+  const { employee_id, range = '30d', from_date, to_date } = req.query;
+  const employees = db.prepare(`SELECT id, name, email, role, phone, avatar, status FROM users WHERE role IN ('agent', 'manager') ORDER BY name`).all() as any[];
+  if (!employees.length) return res.json({ employees: [], employee: null, stats: {}, trend: [], stages: [], leads: [] });
+  const employeeId = typeof employee_id === 'string' && employee_id ? employee_id : employees[0].id;
+  const employee = employees.find(item => item.id === employeeId);
+  if (!employee) return res.status(404).json({ error: 'Employee not found.' });
+
+  const dateBounds = (column: string) => {
+    const clauses: string[] = [];
+    const params: string[] = [];
+    if (typeof from_date === 'string' && from_date) { clauses.push(`date(${column}) >= date(?)`); params.push(from_date); }
+    if (typeof to_date === 'string' && to_date) { clauses.push(`date(${column}) <= date(?)`); params.push(to_date); }
+    if (!clauses.length) {
+      if (range === 'today') clauses.push(`date(${column}) = date('now', 'localtime')`);
+      else if (range === '7d') clauses.push(`date(${column}) >= date('now', 'localtime', '-6 days') AND date(${column}) <= date('now', 'localtime')`);
+      else if (range === '30d') clauses.push(`date(${column}) >= date('now', 'localtime', 'start of month') AND date(${column}) <= date('now', 'localtime')`);
+      else if (range === 'last_month') clauses.push(`strftime('%Y-%m', ${column}, 'localtime') = strftime('%Y-%m', 'now', 'localtime', '-1 month')`);
+    }
+    return { sql: clauses.length ? ` AND ${clauses.join(' AND ')}` : '', params };
+  };
+  const leadRange = dateBounds('l.created_at');
+  const leadRows = db.prepare(`
+    SELECT l.*, COALESCE(fs.name, 'Unassigned') AS stage_name, fs.color AS stage_color,
+      (SELECT o.payment_status FROM orders o WHERE o.customer_id = l.converted_customer_id ORDER BY o.order_date DESC LIMIT 1) AS invoice_status
+    FROM leads l LEFT JOIN funnel_stages fs ON fs.id = l.stage_id
+    WHERE l.assigned_agent_id = ?${leadRange.sql} ORDER BY l.created_at DESC
+  `).all(employeeId, ...leadRange.params) as any[];
+  const activityRange = dateBounds('created_at');
+  const totalCalls = (db.prepare(`SELECT COUNT(*) count FROM lead_activities WHERE user_id = ? AND activity_type = 'call'${activityRange.sql}`).get(employeeId, ...activityRange.params) as any).count;
+  const followRange = dateBounds('created_at');
+  const followUps = (db.prepare(`SELECT COUNT(*) count FROM follow_ups WHERE assigned_user_id = ?${followRange.sql}`).get(employeeId, ...followRange.params) as any).count;
+  const revenueRange = dateBounds('o.order_date');
+  const revenue = (db.prepare(`SELECT COALESCE(SUM(o.order_amount), 0) amount FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.assigned_agent_id = ?${revenueRange.sql}`).get(employeeId, ...revenueRange.params) as any).amount;
+  const hotLeads = leadRows.filter(lead => ['High', 'Urgent'].includes(lead.priority) && !lead.is_converted).length;
+  const convertedLeads = leadRows.filter(lead => Boolean(lead.is_converted)).length;
+  const trendRange = dateBounds('a.created_at');
+  const trendRows = db.prepare(`
+    SELECT date(a.created_at) AS date,
+      SUM(CASE WHEN a.activity_type = 'call' THEN 1 ELSE 0 END) AS calls,
+      COUNT(DISTINCT CASE WHEN l.created_at IS NOT NULL AND date(l.created_at) = date(a.created_at) THEN l.id END) AS leads
+    FROM lead_activities a LEFT JOIN leads l ON l.id = a.lead_id
+    WHERE a.user_id = ?${trendRange.sql} GROUP BY date(a.created_at) ORDER BY date(a.created_at)
+  `).all(employeeId, ...trendRange.params) as any[];
+  const leadTrend = db.prepare(`SELECT date(created_at) AS date, COUNT(*) AS leads FROM leads WHERE assigned_agent_id = ?${dateBounds('created_at').sql} GROUP BY date(created_at)`).all(employeeId, ...dateBounds('created_at').params) as any[];
+  const trendMap = new Map<string, { date: string; calls: number; leads: number }>();
+  for (const row of trendRows) trendMap.set(row.date, { date: row.date, calls: Number(row.calls) || 0, leads: 0 });
+  for (const row of leadTrend) trendMap.set(row.date, { ...(trendMap.get(row.date) || { date: row.date, calls: 0, leads: 0 }), leads: Number(row.leads) || 0 });
+  const trend = [...trendMap.values()].sort((a, b) => a.date.localeCompare(b.date));
+  const stageMap = new Map<string, { stage: string; count: number; color: string }>();
+  for (const lead of leadRows) {
+    const item = stageMap.get(lead.stage_name) || { stage: lead.stage_name, count: 0, color: lead.stage_color || '#10b981' };
+    item.count += 1;
+    stageMap.set(lead.stage_name, item);
+  }
+  const comparisonRange = dateBounds('l.created_at');
+  const comparison = db.prepare(`
+    SELECT u.id AS employee_id, COUNT(l.id) AS total_leads,
+      SUM(CASE WHEN l.is_converted = 1 THEN 1 ELSE 0 END) AS converted_leads
+    FROM users u LEFT JOIN leads l ON l.assigned_agent_id = u.id${comparisonRange.sql}
+    WHERE u.role IN ('agent', 'manager') GROUP BY u.id ORDER BY total_leads DESC, u.name
+  `).all(...comparisonRange.params);
+  const activityDateRange = dateBounds('a.created_at');
+  const activities = db.prepare(`
+    SELECT a.id, a.title, a.outcome, a.created_at, l.customer_name AS lead_name, l.lead_code
+    FROM lead_activities a LEFT JOIN leads l ON l.id = a.lead_id
+    WHERE a.user_id = ? AND a.activity_type = 'call'${activityDateRange.sql}
+    ORDER BY a.created_at DESC LIMIT 200
+  `).all(employeeId, ...activityDateRange.params);
+  const followUpDateRange = dateBounds('f.scheduled_at');
+  const followUpItems = db.prepare(`
+    SELECT f.id, f.purpose, f.status, f.scheduled_at, f.notes,
+      l.customer_name AS lead_name, c.name AS customer_name
+    FROM follow_ups f LEFT JOIN leads l ON l.id = f.lead_id LEFT JOIN customers c ON c.id = f.customer_id
+    WHERE f.assigned_user_id = ?${followUpDateRange.sql}
+    ORDER BY f.scheduled_at DESC LIMIT 200
+  `).all(employeeId, ...followUpDateRange.params);
+  const orderDateRange = dateBounds('o.order_date');
+  const orders = db.prepare(`
+    SELECT o.id, o.order_code, o.customer_name, o.product_name, o.order_amount,
+      o.payment_status, o.order_status, o.order_date
+    FROM orders o JOIN customers c ON c.id = o.customer_id
+    WHERE c.assigned_agent_id = ?${orderDateRange.sql}
+    ORDER BY o.order_date DESC LIMIT 200
+  `).all(employeeId, ...orderDateRange.params);
+  return res.json({
+    employee, employees,
+    stats: { totalCalls, totalLeads: leadRows.length, convertedLeads, hotLeads, followUps, revenue: Number(revenue) || 0, conversionRate: leadRows.length ? Math.round(convertedLeads / leadRows.length * 100) : 0 },
+    trend,
+    stages: [...stageMap.values()].sort((a, b) => b.count - a.count),
+    leads: leadRows,
+    comparison,
+    activities,
+    followUpItems,
+    orders
   });
 };
 

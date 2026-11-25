@@ -11,13 +11,15 @@ import {
   MapPin,
   ArrowRight,
   X,
-  Loader2
+  Loader2,
+  Menu
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { api } from '../services/api';
 import { Customer, Lead, Order } from '../types';
 
 interface NavbarProps {
+  onOpenNavigation: () => void;
   onSearch: (query: string) => void;
   openCreateLeadModal: () => void;
   openCreateOrderModal: () => void;
@@ -27,6 +29,7 @@ interface NavbarProps {
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
+  onOpenNavigation,
   onSearch,
   openCreateLeadModal,
   openCreateOrderModal,
@@ -128,9 +131,10 @@ export const Navbar: React.FC<NavbarProps> = ({
     suggestions.customers.length + suggestions.orders.length + suggestions.leads.length;
 
   return (
-    <header className="h-16 bg-white border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between sticky top-0 z-30 shadow-xs">
+    <header className="app-navbar h-16 bg-white border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between sticky top-0 z-30 shadow-xs">
+      <button type="button" className="mobile-menu-button" onClick={onOpenNavigation} aria-label="Open navigation"><Menu className="h-5 w-5" /></button>
       {/* Global Universal Search Bar with Live Suggestions */}
-      <div ref={searchContainerRef} className="flex-1 max-w-xl relative">
+      <div ref={searchContainerRef} className="navbar-search flex-1 max-w-xl relative">
         <form onSubmit={handleSearchSubmit} className="relative flex items-center">
           <div className="absolute left-3.5 flex items-center gap-1.5 text-slate-400 pointer-events-none">
             <Search className="w-4 h-4 text-emerald-600" />
@@ -139,6 +143,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
           <input
             type="text"
+            aria-label="Global search"
             value={searchValue}
             onChange={(e) => setSearchValue(e.target.value)}
             onFocus={() => {

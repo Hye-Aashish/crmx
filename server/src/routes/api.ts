@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { authenticate, requireRole } from '../middleware/auth';
+import { authenticate, requireRole, requirePermission } from '../middleware/auth';
 import * as CRM from '../controllers/crmController';
 
 const router = Router();
@@ -88,10 +88,11 @@ router.post('/customers', CRM.createCustomer);
 router.put('/customers/:id', CRM.updateCustomer);
 
 // Orders & Tracking Management
-router.get('/orders', CRM.getOrders);
-router.get('/orders/:id', CRM.getOrderById);
-router.post('/orders', CRM.createOrder);
-router.post('/orders/:id/location', CRM.updateOrderLocationAndStatus); // Manual location update
+router.get('/orders', requirePermission('view_orders'), CRM.getOrders);
+router.get('/orders/:id', requirePermission('view_orders'), CRM.getOrderById);
+router.post('/orders', requirePermission('create_orders'), CRM.createOrder);
+router.put('/orders/:id', requirePermission('edit_orders'), CRM.updateOrder);
+router.post('/orders/:id/location', requirePermission('update_order_location'), CRM.updateOrderLocationAndStatus); // Manual location update
 
 // Follow-ups & Reminders
 router.get('/follow-ups', CRM.getFollowUps);
@@ -104,6 +105,7 @@ router.get('/search', CRM.globalSearch);
 
 // Dashboard Analytics
 router.get('/analytics/overview', CRM.getAnalytics);
+router.get('/employee-performance', requirePermission('view_analytics'), CRM.getEmployeePerformance);
 
 // Web Forms Management (Admin & Manager)
 router.get('/forms', CRM.getForms);

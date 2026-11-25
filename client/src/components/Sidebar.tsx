@@ -10,8 +10,9 @@ import {
   ShieldCheck,
   LogOut,
   ChevronRight,
+  X,
   TrendingUp,
-  FileText
+  ChartNoAxesCombined
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -20,13 +21,19 @@ interface SidebarProps {
   setCurrentTab: (tab: string) => void;
   collapsed: boolean;
   setCollapsed: (collapsed: boolean) => void;
+  mobileOpen: boolean;
+  onNavigate: () => void;
+  onClose: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
   currentTab,
   setCurrentTab,
   collapsed,
-  setCollapsed
+  setCollapsed,
+  mobileOpen,
+  onNavigate,
+  onClose
 }) => {
   const { user, logout } = useAuth();
 
@@ -34,17 +41,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'leads', label: 'Leads Management', icon: Users2 },
     { id: 'pipeline', label: 'Sales Funnel (Kanban)', icon: GitPullRequest },
-    { id: 'forms', label: 'Form Builder', icon: FileText },
     { id: 'followups', label: 'Follow-ups & Reminders', icon: Clock },
     { id: 'customers', label: 'Customer Profiles', icon: UserCheck },
     { id: 'orders', label: 'Orders & Tracking', icon: PackageCheck },
+    { id: 'employee-performance', label: 'Employee Performance', icon: ChartNoAxesCombined, analyticsOnly: true },
     { id: 'search', label: 'Global Phone Search', icon: Search },
     { id: 'users', label: 'Users & Roles', icon: ShieldCheck, adminOnly: true }
   ];
 
   return (
+    <>
+    {mobileOpen && <button aria-label="Close navigation" className="mobile-nav-backdrop" onClick={onClose} />}
     <aside
-      className={`bg-slate-900 text-white flex flex-col transition-all duration-300 border-r border-slate-800 select-none z-30 ${
+      className={`app-sidebar bg-slate-900 text-white flex flex-col transition-all duration-300 border-r border-slate-800 select-none z-30 ${mobileOpen ? 'mobile-open' : ''} ${
         collapsed ? 'w-20' : 'w-64'
       }`}
     >
@@ -70,6 +79,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
           )}
         </div>
         <button
+          className="mobile-sidebar-close p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white"
+          onClick={onClose}
+          aria-label="Close navigation"
+        ><X className="w-4 h-4" /></button>
+        <button
           onClick={() => setCollapsed(!collapsed)}
           className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors"
           title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
@@ -86,13 +100,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
       <nav className="flex-1 px-3 py-4 space-y-1.5 overflow-y-auto">
         {menuItems.map((item) => {
           if (item.adminOnly && user?.role === 'agent') return null;
+          if (item.analyticsOnly && user?.role !== 'admin' && !user?.permissions?.includes('view_analytics')) return null;
           const Icon = item.icon;
           const active = currentTab === item.id;
 
           return (
             <button
               key={item.id}
-              onClick={() => setCurrentTab(item.id)}
+              onClick={() => { setCurrentTab(item.id); onNavigate(); }}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
                 active
                   ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-md shadow-emerald-600/25 font-semibold'
@@ -104,7 +119,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               {!collapsed && <span className="truncate">{item.label}</span>}
               {!collapsed && item.id === 'pipeline' && (
                 <span className="ml-auto text-[10px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded font-mono">
-                  D&D
+                  D&amp;D
                 </span>
               )}
             </button>
@@ -140,5 +155,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       </div>
     </aside>
+    </>
   );
 };
