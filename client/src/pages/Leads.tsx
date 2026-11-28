@@ -27,9 +27,14 @@ import { useAuth } from '../context/AuthContext';
 interface LeadsProps {
   onOpenCustomer: (customerId: string) => void;
   openCreateModalTrigger?: boolean;
+  onCreateModalTriggerHandled?: () => void;
 }
 
-export const Leads: React.FC<LeadsProps> = ({ onOpenCustomer }) => {
+export const Leads: React.FC<LeadsProps> = ({
+  onOpenCustomer,
+  openCreateModalTrigger = false,
+  onCreateModalTriggerHandled
+}) => {
   const { user } = useAuth();
   const [leads, setLeads] = useState<Lead[]>([]);
   const [stages, setStages] = useState<FunnelStage[]>([]);
@@ -112,6 +117,12 @@ export const Leads: React.FC<LeadsProps> = ({ onOpenCustomer }) => {
   useEffect(() => {
     loadData();
   }, [search, stageFilter, sourceFilter, agentFilter, priorityFilter, statusFilter]);
+
+  useEffect(() => {
+    if (!openCreateModalTrigger) return;
+    setShowCreateModal(true);
+    onCreateModalTriggerHandled?.();
+  }, [openCreateModalTrigger, onCreateModalTriggerHandled]);
 
   const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.checked) {
