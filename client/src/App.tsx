@@ -139,6 +139,7 @@ const MainLayout: React.FC = () => {
                 setCurrentTab('customers');
               }}
               openCreateModalTrigger={openLeadModalTrigger}
+              onCreateModalTriggerHandled={() => setOpenLeadModalTrigger(false)}
             />
           )}
           {currentTab === 'pipeline' && (
