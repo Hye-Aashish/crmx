@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { api } from '../services/api';
 import { Customer } from '../types';
+import { useAuth } from '../context/AuthContext';
 
 interface CustomersProps {
   initialCustomerId?: string;
@@ -32,6 +33,9 @@ export const Customers: React.FC<CustomersProps> = ({
   openCreateOrderWithCustomerId,
   onNavigateToOrder
 }) => {
+  const { hasPermission } = useAuth();
+  const canEditCustomers = hasPermission('edit_customers');
+  const canCreateOrders = hasPermission('create_orders');
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -111,30 +115,34 @@ export const Customers: React.FC<CustomersProps> = ({
   };
 
   return (
-    <div className="p-4 sm:p-6 max-w-7xl mx-auto space-y-6 animate-fade-in">
+    <div className="page-wrap">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="page-header">
         <div>
-          <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight flex items-center gap-2">
-            <UserCheck className="w-6 h-6 text-emerald-600" />
+          <h1 className="page-title">
+            <span className="title-icon">
+              <UserCheck className="w-5 h-5" />
+            </span>
             Customer Management & Accounts
           </h1>
-          <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
+          <p className="page-subtitle sm:ml-[3.25rem]">
             Centralized customer profiles linked with original leads and order tracking journeys.
           </p>
         </div>
 
-        <button
-          onClick={() => setShowCreateModal(true)}
-          className="btn-primary self-start sm:self-auto"
-        >
-          <Plus className="w-4 h-4" />
-          Add Customer
-        </button>
+        {canEditCustomers && (
+          <button
+            onClick={() => setShowCreateModal(true)}
+            className="btn-primary self-start sm:self-auto"
+          >
+            <Plus className="w-4 h-4" />
+            Add Customer
+          </button>
+        )}
       </div>
 
       {/* Search & Filter Bar */}
-      <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs flex items-center justify-between gap-4">
+      <div className="filter-bar flex items-center justify-between gap-4">
         <div className="relative flex-1 max-w-md">
           <Search className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
           <input
@@ -152,7 +160,7 @@ export const Customers: React.FC<CustomersProps> = ({
       </div>
 
       {/* Customers Table */}
-      <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
+      <div className="panel-flush">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead>
@@ -271,7 +279,7 @@ export const Customers: React.FC<CustomersProps> = ({
               </div>
 
               <div className="flex items-center gap-2">
-                {openCreateOrderWithCustomerId && (
+                {canCreateOrders && openCreateOrderWithCustomerId && (
                   <button
                     onClick={() => {
                       const cid = customerDetail.customer?.id;

@@ -24,16 +24,21 @@ import {
 } from 'lucide-react';
 import { api } from '../services/api';
 import { Order, OrderTracking, Customer } from '../types';
+import { useAuth } from '../context/AuthContext';
 
 interface OrdersProps {
   initialOrderId?: string;
   preselectedCustomerId?: string;
+  initialFilter?: string;
 }
 
 export const Orders: React.FC<OrdersProps> = ({
   initialOrderId,
-  preselectedCustomerId
+  preselectedCustomerId,
+  initialFilter
 }) => {
+  const { hasPermission } = useAuth();
+  const canCreateOrders = hasPermission('create_orders');
   const [orders, setOrders] = useState<Order[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
@@ -41,7 +46,10 @@ export const Orders: React.FC<OrdersProps> = ({
   // Filters
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
-  const [paymentFilter, setPaymentFilter] = useState('');
+  const [paymentFilter, setPaymentFilter] = useState(initialFilter === 'due_payment' ? 'due' : '');
+  const [invoiceFilter, setInvoiceFilter] = useState(
+    initialFilter === 'invoice_pending' ? '0' : initialFilter === 'invoice_sent' ? '1' : ''
+  );
 
   // Selected Order for Tracking Timeline View
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
@@ -56,17 +64,21 @@ export const Orders: React.FC<OrdersProps> = ({
     end_location: '',
     order_status: 'In Transit',
     remarks: '',
-    payment_status: 'Paid'
+    payment_status: 'Paid',
+    invoice_sent: false
   });
 
   // Create Order Modal
-  const [showCreateModal, setShowCreateModal] = useState(!!preselectedCustomerId);
+  const [showCreateModal, setShowCreateModal] = useState(
+    () => !!preselectedCustomerId && canCreateOrders
+  );
   const [newOrder, setNewOrder] = useState({
     customer_id: preselectedCustomerId || '',
     product_name: '',
     quantity: 1,
     order_amount: 0,
     payment_status: 'Pending',
+    invoice_sent: false,
     order_status: 'Order Placed',
     start_location: 'New York Logistics Center',
     current_location: 'New York Logistics Center',
@@ -82,7 +94,8 @@ export const Orders: React.FC<OrdersProps> = ({
         api.getOrders({
           search,
           order_status: statusFilter,
-          payment_status: paymentFilter
+          payment_status: paymentFilter,
+          ...(invoiceFilter !== '' ? { invoice_sent: invoiceFilter } : {})
         }),
         api.getCustomers()
       ]);
@@ -101,8 +114,29 @@ export const Orders: React.FC<OrdersProps> = ({
   };
 
   useEffect(() => {
+    if (initialFilter === 'due_payment') {
+      setPaymentFilter('due');
+      setInvoiceFilter('');
+    } else if (initialFilter === 'invoice_pending') {
+      setInvoiceFilter('0');
+      setPaymentFilter('');
+    } else if (initialFilter === 'invoice_sent') {
+      setInvoiceFilter('1');
+      setPaymentFilter('');
+    } else if (!initialFilter) {
+      // keep current filters when opening a specific order
+    }
+  }, [initialFilter]);
+
+  useEffect(() => {
     loadOrders();
-  }, [search, statusFilter, paymentFilter]);
+  }, [search, statusFilter, paymentFilter, invoiceFilter]);
+
+  useEffect(() => {
+    if (initialOrderId) {
+      handleViewOrder(initialOrderId);
+    }
+  }, [initialOrderId]);
 
   // When preselected customer changes, auto-fill destination
   useEffect(() => {
@@ -152,9 +186,30 @@ export const Orders: React.FC<OrdersProps> = ({
       end_location: ord.end_location || 'Customer Delivery Address',
       order_status: ord.order_status,
       remarks: '',
-      payment_status: ord.payment_status
+      payment_status: ord.payment_status,
+      invoice_sent: !!ord.invoice_sent
     });
     setShowLocationModal(true);
+  };
+
+  const handleToggleInvoice = async (ord: Order) => {
+    try {
+      await api.updateOrderLocation(ord.id, {
+        current_location: ord.current_location,
+        start_location: ord.start_location,
+        end_location: ord.end_location,
+        order_status: ord.order_status,
+        payment_status: ord.payment_status,
+        invoice_sent: !ord.invoice_sent,
+        remarks: !ord.invoice_sent ? 'Invoice marked as sent' : 'Invoice marked as not sent'
+      });
+      loadOrders();
+      if (selectedOrder?.id === ord.id) {
+        handleViewOrder(ord.id);
+      }
+    } catch (err: any) {
+      alert(err.message);
+    }
   };
 
   const handleSaveLocationUpdate = async (e: React.FormEvent) => {
@@ -182,6 +237,7 @@ export const Orders: React.FC<OrdersProps> = ({
         quantity: 1,
         order_amount: 0,
         payment_status: 'Pending',
+        invoice_sent: false,
         order_status: 'Order Placed',
         start_location: 'New York Logistics Center',
         current_location: 'New York Logistics Center',
@@ -228,57 +284,61 @@ export const Orders: React.FC<OrdersProps> = ({
   const totalRevenue = orders.reduce((acc, o) => acc + (Number(o.order_amount) || 0), 0);
 
   return (
-    <div className="p-4 sm:p-6 max-w-7xl mx-auto space-y-6 animate-fade-in">
+    <div className="page-wrap">
       {/* Top Header & Summary */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="page-header">
         <div>
-          <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight flex items-center gap-2">
-            <PackageCheck className="w-6 h-6 text-emerald-600" />
-            Order Management & 3-Location Tracking
+          <h1 className="page-title">
+            <span className="title-icon">
+              <PackageCheck className="w-5 h-5" />
+            </span>
+            <span className="leading-tight">Order Management & Tracking</span>
           </h1>
-          <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
-            Track shipments across <strong>Start (Origin)</strong>, <strong>Current Checkpoint</strong>, and <strong>End (Delivery)</strong> locations with audit history.
+          <p className="page-subtitle sm:ml-[3.25rem]">
+            Track shipments across start, current, and delivery locations.
           </p>
         </div>
 
-        <button
-          onClick={() => setShowCreateModal(true)}
-          className="btn-primary self-start sm:self-auto"
-        >
-          <Plus className="w-4 h-4" />
-          Create Order
-        </button>
+        {canCreateOrders && (
+          <button
+            onClick={() => setShowCreateModal(true)}
+            className="btn-primary self-start sm:self-auto w-full sm:w-auto"
+          >
+            <Plus className="w-4 h-4" />
+            Create Order
+          </button>
+        )}
       </div>
 
       {/* KPI Cards (Clean Green Theme) */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-        <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs">
+        <div className="kpi-tile">
           <div className="text-xs font-semibold text-slate-500">Total Orders</div>
-          <div className="text-2xl font-black text-slate-900 mt-1">{totalOrdersCount}</div>
+          <div className="font-display text-2xl font-black text-slate-900 mt-1">{totalOrdersCount}</div>
           <div className="text-[11px] text-emerald-700 font-medium mt-0.5">All customer orders</div>
         </div>
 
-        <div className="bg-white p-4 rounded-2xl border border-emerald-100 shadow-xs bg-gradient-to-br from-white to-emerald-50/30">
+        <div className="kpi-tile border-emerald-100">
           <div className="text-xs font-semibold text-emerald-800 flex items-center gap-1.5">
             <Truck className="w-3.5 h-3.5 text-emerald-600" />
             In Transit / Active
           </div>
-          <div className="text-2xl font-black text-emerald-700 mt-1">{inTransitCount}</div>
+          <div className="font-display text-2xl font-black text-emerald-700 mt-1">{inTransitCount}</div>
           <div className="text-[11px] text-emerald-600 font-medium mt-0.5">Moving between hubs</div>
         </div>
 
-        <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs">
+        <div className="kpi-tile">
           <div className="text-xs font-semibold text-slate-500 flex items-center gap-1.5">
             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
             Delivered Orders
           </div>
-          <div className="text-2xl font-black text-slate-900 mt-1">{deliveredCount}</div>
+          <div className="font-display text-2xl font-black text-slate-900 mt-1">{deliveredCount}</div>
           <div className="text-[11px] text-slate-500 font-medium mt-0.5">Successfully fulfilled</div>
         </div>
 
-        <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs">
+        <div className="kpi-tile">
           <div className="text-xs font-semibold text-slate-500">Total Order Volume</div>
-          <div className="text-2xl font-black font-mono text-emerald-800 mt-1">
+          <div className="font-display text-2xl font-black font-mono text-emerald-800 mt-1">
             ₹{totalRevenue.toLocaleString()}
           </div>
           <div className="text-[11px] text-slate-500 font-medium mt-0.5">Cumulative billing</div>
@@ -286,14 +346,14 @@ export const Orders: React.FC<OrdersProps> = ({
       </div>
 
       {/* Filter Bar */}
-      <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs flex flex-wrap items-center gap-3">
-        <div className="relative flex-1 min-w-[240px]">
+      <div className="filter-bar flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2 sm:gap-3">
+        <div className="relative flex-1 min-w-0 sm:min-w-[200px]">
           <Search className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by Order ID (5001), Customer, Phone, or Location..."
+            placeholder="Search order, customer, phone..."
             className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-600"
           />
         </div>
@@ -317,15 +377,26 @@ export const Orders: React.FC<OrdersProps> = ({
           className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700 focus:outline-none focus:border-emerald-600"
         >
           <option value="">All Payment Statuses</option>
+          <option value="due">Due Payment (Pending / Partial)</option>
           <option value="Paid">Paid</option>
           <option value="Pending">Pending</option>
           <option value="Partial">Partial</option>
           <option value="Refunded">Refunded</option>
         </select>
+
+        <select
+          value={invoiceFilter}
+          onChange={(e) => setInvoiceFilter(e.target.value)}
+          className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700 focus:outline-none focus:border-emerald-600"
+        >
+          <option value="">All Invoice Status</option>
+          <option value="1">Invoice Sent</option>
+          <option value="0">Invoice Not Sent</option>
+        </select>
       </div>
 
       {/* Orders Table with 3 Locations */}
-      <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
+      <div className="panel-flush">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead>
@@ -384,15 +455,29 @@ export const Orders: React.FC<OrdersProps> = ({
                       <div className="font-mono font-bold text-slate-900">
                         ₹{Number(ord.order_amount).toLocaleString()}
                       </div>
-                      <span
-                        className={`inline-block px-1.5 py-0.2 rounded text-[10px] font-bold ${
-                          ord.payment_status === 'Paid'
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : 'bg-amber-100 text-amber-800'
-                        }`}
-                      >
-                        {ord.payment_status}
-                      </span>
+                      <div className="flex flex-wrap items-center gap-1 mt-0.5">
+                        <span
+                          className={`inline-block px-1.5 py-0.2 rounded text-[10px] font-bold ${
+                            ord.payment_status === 'Paid'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : 'bg-amber-100 text-amber-800'
+                          }`}
+                        >
+                          {ord.payment_status}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleInvoice(ord)}
+                          title="Toggle invoice sent"
+                          className={`inline-block px-1.5 py-0.2 rounded text-[10px] font-bold border transition-colors ${
+                            ord.invoice_sent
+                              ? 'bg-sky-100 text-sky-800 border-sky-200 hover:bg-sky-200'
+                              : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'
+                          }`}
+                        >
+                          {ord.invoice_sent ? 'Invoice Sent' : 'Invoice Pending'}
+                        </button>
+                      </div>
                     </td>
 
                     {/* Order Status */}
@@ -542,6 +627,16 @@ export const Orders: React.FC<OrdersProps> = ({
                   </select>
                 </div>
               </div>
+
+              <label className="flex items-center gap-2 p-3 rounded-xl border border-slate-200 bg-slate-50 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={newOrder.invoice_sent}
+                  onChange={(e) => setNewOrder({ ...newOrder, invoice_sent: e.target.checked })}
+                  className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                />
+                <span className="text-xs font-bold text-slate-700">Invoice already sent to customer</span>
+              </label>
 
               {/* 3 LOCATIONS SECTION */}
               <div className="p-3 bg-emerald-50/50 rounded-xl border border-emerald-200/80 space-y-3">
@@ -793,6 +888,16 @@ export const Orders: React.FC<OrdersProps> = ({
                   </select>
                 </div>
               </div>
+
+              <label className="flex items-center gap-2 p-3 rounded-xl border border-sky-200 bg-sky-50/60 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={updateLocForm.invoice_sent}
+                  onChange={(e) => setUpdateLocForm({ ...updateLocForm, invoice_sent: e.target.checked })}
+                  className="rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                />
+                <span className="text-xs font-bold text-slate-700">Invoice sent to customer</span>
+              </label>
 
               {/* Checkpoint Remarks */}
               <div>

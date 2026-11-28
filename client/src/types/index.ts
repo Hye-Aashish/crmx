@@ -45,6 +45,15 @@ export interface LeadSource {
   is_active: number;
 }
 
+export interface LeadTag {
+  id: string;
+  name: string;
+  color: string;
+  is_active?: number;
+  lead_count?: number;
+  created_at?: string;
+}
+
 export interface Lead {
   id: string;
   lead_code: string;
@@ -73,6 +82,7 @@ export interface Lead {
   next_followup_at?: string;
   last_contacted_at?: string;
   notes?: string;
+  tags?: LeadTag[];
   created_at: string;
   updated_at: string;
 }
@@ -108,6 +118,7 @@ export interface FollowUp {
   completed_at?: string;
   outcome?: string;
   created_at: string;
+  tags?: LeadTag[];
 }
 
 export interface Customer {
@@ -150,6 +161,7 @@ export interface Order {
   quantity: number;
   order_amount: number;
   payment_status: 'Pending' | 'Partial' | 'Paid' | 'Refunded';
+  invoice_sent?: number;
   order_status: string;
   start_location: string;
   current_location: string;
@@ -177,42 +189,15 @@ export interface OrderTracking {
 
 export interface DashboardMetrics {
   totalLeads: number;
-  activeLeads: number;
-  convertedLeads: number;
+  pendingFollowUps: number;
+  overdueFollowUpsCount: number;
+  invoicesSent: number;
+  invoicesPending: number;
+  duePayments: number;
+  duePaymentAmount: number;
   totalOrders: number;
   totalRevenue: number;
-  conversionRate: string;
-}
-
-export interface FormField {
-  id: string;
-  label: string;
-  type: 'text' | 'email' | 'phone' | 'number' | 'textarea' | 'select' | 'checkbox';
-  placeholder?: string;
-  required: boolean;
-  options?: string[];
-  mapToLeadField?: 'customer_name' | 'phone' | 'email' | 'company_name' | 'city' | 'estimated_deal_value' | 'notes';
-  helpText?: string;
-}
-
-export interface WebForm {
-  id: string;
-  title: string;
-  slug: string;
-  description?: string;
-  source_name: string;
-  assigned_agent_id?: string;
-  assigned_agent_name?: string;
-  stage_id?: string;
-  stage_name?: string;
-  fields: FormField[];
-  theme_color: string;
-  button_text: string;
-  success_message: string;
-  redirect_url?: string;
-  submission_count: number;
-  is_active: number;
-  created_at: string;
-  updated_at: string;
+  convertedLeads?: number;
+  conversionRate?: string;
 }
 

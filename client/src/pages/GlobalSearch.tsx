@@ -1,21 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import {
   Search,
-  Phone,
   UserCheck,
   Users2,
   PackageCheck,
   MapPin,
-  Calendar,
-  Building,
-  Clock,
   ArrowRight,
-  TrendingUp,
-  ShieldCheck,
-  Layers,
   CheckCircle2,
-  Flag,
-  Navigation
 } from 'lucide-react';
 import { api } from '../services/api';
 import { Customer, Lead, Order } from '../types';
@@ -24,12 +15,14 @@ interface GlobalSearchProps {
   initialQuery?: string;
   onNavigateToCustomer: (id: string) => void;
   onNavigateToOrder: (id: string) => void;
+  onNavigateToLead?: (id: string) => void;
 }
 
 export const GlobalSearch: React.FC<GlobalSearchProps> = ({
   initialQuery = '',
   onNavigateToCustomer,
-  onNavigateToOrder
+  onNavigateToOrder,
+  onNavigateToLead
 }) => {
   const [query, setQuery] = useState(initialQuery);
   const [activeFilter, setActiveFilter] = useState<'all' | 'customers' | 'orders' | 'leads'>('all');
@@ -76,15 +69,15 @@ export const GlobalSearch: React.FC<GlobalSearchProps> = ({
   const totalHits = results.customers.length + results.orders.length + results.leads.length;
 
   return (
-    <div className="p-4 sm:p-6 max-w-7xl mx-auto space-y-6 animate-fade-in">
-      {/* Search Header Banner (Emerald Theme) */}
-      <div className="bg-gradient-to-r from-emerald-950 via-slate-900 to-emerald-900 rounded-3xl p-6 sm:p-8 text-white shadow-xl relative overflow-hidden">
+    <div className="page-wrap">
+      {/* Search Header Banner */}
+      <div className="bg-gradient-to-br from-slate-950 via-emerald-950 to-teal-900 rounded-[1.75rem] p-6 sm:p-8 text-white shadow-2xl shadow-emerald-900/20 relative overflow-hidden ring-1 ring-emerald-400/15">
         <div className="relative z-10 max-w-2xl space-y-3">
-          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 text-xs font-semibold border border-emerald-500/30">
+          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-400/15 text-emerald-300 text-xs font-semibold border border-emerald-400/25">
             <Search className="w-3.5 h-3.5" />
             Universal Multi-Entity Index
           </div>
-          <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight">
+          <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight">
             Universal Global Search
           </h1>
           <p className="text-emerald-100/80 text-xs sm:text-sm">
@@ -111,11 +104,9 @@ export const GlobalSearch: React.FC<GlobalSearchProps> = ({
           </form>
         </div>
 
-        {/* Decorative background glow */}
         <div className="absolute right-0 bottom-0 w-96 h-96 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none"></div>
       </div>
 
-      {/* Loading state */}
       {loading && (
         <div className="py-12 text-center text-slate-400 text-xs flex items-center justify-center gap-2">
           <div className="w-4 h-4 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin"></div>
@@ -123,11 +114,10 @@ export const GlobalSearch: React.FC<GlobalSearchProps> = ({
         </div>
       )}
 
-      {/* Results View */}
       {!loading && hasSearched && (
         <div className="space-y-6">
           {/* Summary & Filter Pills */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-3 rounded-2xl border border-slate-200/80 shadow-2xs">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 filter-bar !p-3">
             <div className="flex items-center gap-2 text-xs font-semibold text-slate-700">
               <span>Query:</span>
               <span className="text-emerald-700 font-mono bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
@@ -136,8 +126,7 @@ export const GlobalSearch: React.FC<GlobalSearchProps> = ({
               <span className="text-slate-400">• Total matches: {totalHits}</span>
             </div>
 
-            {/* Filter Tabs */}
-            <div className="flex items-center gap-1.5 text-xs">
+            <div className="flex items-center gap-1.5 text-xs flex-wrap">
               <button
                 onClick={() => setActiveFilter('all')}
                 className={`px-3 py-1 rounded-xl font-bold transition-all ${
@@ -182,141 +171,180 @@ export const GlobalSearch: React.FC<GlobalSearchProps> = ({
           </div>
 
           {totalHits === 0 && (
-            <div className="p-12 text-center bg-white rounded-2xl border border-slate-200 text-slate-400 text-xs">
+            <div className="p-12 text-center panel text-slate-400 text-xs">
               No matching records found for "{query}". Try searching by a phone number, customer name, or order number (e.g. 5001).
             </div>
           )}
 
-          {/* 1. ORDERS LIST (With 3 Locations Journey) */}
+          {/* ORDERS TABLE */}
           {(activeFilter === 'all' || activeFilter === 'orders') && results.orders.length > 0 && (
             <div className="space-y-3">
               <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center gap-2">
                 <PackageCheck className="w-4 h-4 text-emerald-600" />
-                Matching Orders & 3-Location Tracking ({results.orders.length})
+                Matching Orders ({results.orders.length})
               </h2>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {results.orders.map((ord) => (
-                  <div
-                    key={ord.id}
-                    className="bg-white rounded-2xl border border-slate-200/80 p-4 shadow-xs space-y-3 hover:border-emerald-300 transition-all"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono font-bold text-xs text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                          {ord.order_code}
-                        </span>
-                        <span className="text-xs font-semibold text-slate-800 truncate">
-                          {ord.customer_name}
-                        </span>
-                      </div>
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
-                        {ord.order_status}
-                      </span>
-                    </div>
-
-                    <div className="text-xs font-medium text-slate-700">
-                      Product: <strong>{ord.product_name}</strong>
-                    </div>
-
-                    {/* 3-Location Route Display */}
-                    <div className="bg-emerald-50/60 p-3 rounded-xl border border-emerald-100 space-y-1.5 text-xs">
-                      <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-900 flex items-center gap-1">
-                        <Navigation className="w-3 h-3 text-emerald-600" />
-                        Tracking Route
-                      </div>
-                      <div className="grid grid-cols-3 gap-1 text-[11px]">
-                        <div>
-                          <span className="text-slate-400 block text-[9px] font-bold">🟢 START</span>
-                          <span className="font-medium text-slate-800 truncate block">
-                            {ord.start_location || 'Origin Hub'}
-                          </span>
-                        </div>
-                        <div className="bg-white px-2 py-1 rounded border border-emerald-200">
-                          <span className="text-emerald-700 block text-[9px] font-bold">📍 CURRENT</span>
-                          <span className="font-bold text-emerald-800 truncate block">
-                            {ord.current_location}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-slate-400 block text-[9px] font-bold">🏁 DELIVERY</span>
-                          <span className="font-medium text-slate-800 truncate block">
-                            {ord.end_location || 'Customer Address'}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-between pt-2 border-t border-slate-100 text-xs">
-                      <span className="font-mono font-bold text-slate-900">
-                        ₹{Number(ord.order_amount).toLocaleString()}
-                      </span>
-                      <button
-                        onClick={() => onNavigateToOrder(ord.id)}
-                        className="text-xs font-bold text-emerald-700 hover:text-emerald-800 flex items-center gap-1"
-                      >
-                        Track Shipment Timeline
-                        <ArrowRight className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                ))}
+              <div className="panel-flush">
+                <div className="overflow-x-auto">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th className="py-3 px-3">Order Code</th>
+                        <th className="py-3 px-3">Customer</th>
+                        <th className="py-3 px-3">Product</th>
+                        <th className="py-3 px-3">Amount</th>
+                        <th className="py-3 px-3">Status</th>
+                        <th className="py-3 px-3">Route</th>
+                        <th className="py-3 px-3 text-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                      {results.orders.map((ord) => (
+                        <tr key={ord.id} className="hover:bg-slate-50/70 transition-colors">
+                          <td className="py-3 px-3">
+                            <button
+                              onClick={() => onNavigateToOrder(ord.id)}
+                              className="font-mono font-bold text-emerald-700 hover:text-emerald-900 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200"
+                            >
+                              {ord.order_code}
+                            </button>
+                          </td>
+                          <td className="py-3 px-3">
+                            <div className="font-semibold text-slate-900">{ord.customer_name}</div>
+                            <div className="text-[11px] font-mono text-slate-500">{ord.customer_phone}</div>
+                          </td>
+                          <td className="py-3 px-3">
+                            <div className="font-medium text-slate-800 truncate max-w-[170px]">
+                              {ord.product_name}
+                            </div>
+                            <div className="text-[11px] text-slate-400">Qty: {ord.quantity}</div>
+                          </td>
+                          <td className="py-3 px-3">
+                            <div className="font-mono font-bold text-slate-900">
+                              ₹{Number(ord.order_amount).toLocaleString()}
+                            </div>
+                            <span
+                              className={`inline-block mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                ord.payment_status === 'Paid'
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : 'bg-amber-100 text-amber-800'
+                              }`}
+                            >
+                              {ord.payment_status}
+                            </span>
+                          </td>
+                          <td className="py-3 px-3">
+                            <span
+                              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold border ${
+                                ord.order_status === 'Delivered'
+                                  ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                                  : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                              }`}
+                            >
+                              {ord.order_status === 'Delivered' && <CheckCircle2 className="w-3 h-3" />}
+                              {ord.order_status}
+                            </span>
+                          </td>
+                          <td className="py-3 px-3">
+                            <div className="space-y-1 text-[11px] max-w-[260px]">
+                              <div className="flex items-center gap-1 text-slate-500 truncate">
+                                <span className="font-semibold text-slate-700">Start:</span>
+                                <span className="truncate">{ord.start_location || 'Origin Hub'}</span>
+                              </div>
+                              <div className="flex items-center gap-1 font-bold text-emerald-800 bg-emerald-50/80 px-2 py-0.5 rounded border border-emerald-200 truncate">
+                                <MapPin className="w-3 h-3 text-emerald-600 shrink-0" />
+                                <span className="truncate">Current: {ord.current_location}</span>
+                              </div>
+                              <div className="flex items-center gap-1 text-slate-500 truncate">
+                                <span className="font-semibold text-slate-700">End:</span>
+                                <span className="truncate">{ord.end_location || 'Delivery Address'}</span>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="py-3 px-3 text-right">
+                            <button
+                              onClick={() => onNavigateToOrder(ord.id)}
+                              className="inline-flex items-center gap-1 px-3 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-lg text-xs font-bold transition-all border border-emerald-200"
+                            >
+                              Track
+                              <ArrowRight className="w-3.5 h-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           )}
 
-          {/* 2. MATCHING CUSTOMERS */}
+          {/* CUSTOMERS TABLE */}
           {(activeFilter === 'all' || activeFilter === 'customers') && results.customers.length > 0 && (
             <div className="space-y-3">
               <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center gap-2">
                 <UserCheck className="w-4 h-4 text-emerald-600" />
-                Matching Customer Accounts ({results.customers.length})
+                Matching Customers ({results.customers.length})
               </h2>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {results.customers.map((c) => (
-                  <div
-                    key={c.id}
-                    className="bg-white rounded-2xl border border-slate-200/80 p-4 shadow-xs space-y-3 hover:border-emerald-300 transition-all"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-sm text-slate-900">{c.name}</span>
-                          <span className="font-mono text-[10px] text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">
-                            {c.customer_code}
-                          </span>
-                        </div>
-                        <div className="text-xs font-mono text-slate-500 mt-0.5">
-                          {c.phone} {c.company ? `• ${c.company}` : ''}
-                        </div>
-                      </div>
-                      <button
-                        onClick={() => onNavigateToCustomer(c.id)}
-                        className="px-3 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-lg text-xs font-bold transition-all"
-                      >
-                        Open Profile
-                      </button>
-                    </div>
-
-                    {c.address && (
-                      <div className="text-xs text-slate-600 flex items-center gap-1.5">
-                        <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                        <span className="truncate">{c.address}, {c.city || ''}</span>
-                      </div>
-                    )}
-
-                    <div className="flex items-center justify-between text-xs pt-2 border-t border-slate-100 text-slate-500">
-                      <span>Total Orders: <strong className="text-slate-800">{c.total_orders || 0}</strong></span>
-                      <span>Total Value: <strong className="text-emerald-700 font-mono">₹{Number(c.total_order_value || 0).toLocaleString()}</strong></span>
-                    </div>
-                  </div>
-                ))}
+              <div className="panel-flush">
+                <div className="overflow-x-auto">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th className="py-3 px-3">Customer ID</th>
+                        <th className="py-3 px-3">Name</th>
+                        <th className="py-3 px-3">Phone & Email</th>
+                        <th className="py-3 px-3">Company & City</th>
+                        <th className="py-3 px-3">Orders</th>
+                        <th className="py-3 px-3">Order Value</th>
+                        <th className="py-3 px-3 text-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                      {results.customers.map((c) => (
+                        <tr key={c.id} className="hover:bg-slate-50/70 transition-colors">
+                          <td className="py-3 px-3">
+                            <button
+                              onClick={() => onNavigateToCustomer(c.id)}
+                              className="font-mono font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 hover:text-emerald-950"
+                            >
+                              {c.customer_code}
+                            </button>
+                          </td>
+                          <td className="py-3 px-3 font-semibold text-slate-900">{c.name}</td>
+                          <td className="py-3 px-3 font-mono text-slate-800">
+                            <div>{c.phone}</div>
+                            {c.email && <div className="text-[11px] text-slate-400 font-sans">{c.email}</div>}
+                          </td>
+                          <td className="py-3 px-3">
+                            <div className="font-medium text-slate-800">{c.company || '—'}</div>
+                            {c.city && <div className="text-[11px] text-slate-400">{c.city}</div>}
+                          </td>
+                          <td className="py-3 px-3 font-bold text-slate-900">
+                            {c.total_orders || 0}
+                          </td>
+                          <td className="py-3 px-3 font-mono font-bold text-emerald-700">
+                            ₹{Number(c.total_order_value || 0).toLocaleString()}
+                          </td>
+                          <td className="py-3 px-3 text-right">
+                            <button
+                              onClick={() => onNavigateToCustomer(c.id)}
+                              className="px-3 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-lg text-xs font-bold transition-all border border-emerald-200"
+                            >
+                              Open Profile
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           )}
 
-          {/* 3. MATCHING LEADS */}
+          {/* LEADS TABLE */}
           {(activeFilter === 'all' || activeFilter === 'leads') && results.leads.length > 0 && (
             <div className="space-y-3">
               <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center gap-2">
@@ -324,36 +352,89 @@ export const GlobalSearch: React.FC<GlobalSearchProps> = ({
                 Matching Leads ({results.leads.length})
               </h2>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {results.leads.map((ld) => (
-                  <div
-                    key={ld.id}
-                    className="bg-white rounded-2xl border border-slate-200/80 p-4 shadow-xs space-y-2 hover:border-emerald-300 transition-all"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-xs font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded">
-                          {ld.lead_code}
-                        </span>
-                        <span className="font-bold text-sm text-slate-900">{ld.customer_name}</span>
-                      </div>
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">
-                        {ld.stage_name || 'Stage'}
-                      </span>
-                    </div>
-
-                    <div className="text-xs text-slate-500 font-mono">
-                      {ld.phone} {ld.company_name ? `• ${ld.company_name}` : ''} {ld.city ? `(${ld.city})` : ''}
-                    </div>
-
-                    <div className="flex items-center justify-between pt-2 border-t border-slate-100 text-xs">
-                      <span className="text-slate-500">Est. Deal Value:</span>
-                      <span className="font-mono font-bold text-emerald-700">
-                        ₹{Number(ld.estimated_deal_value || 0).toLocaleString()}
-                      </span>
-                    </div>
-                  </div>
-                ))}
+              <div className="panel-flush">
+                <div className="overflow-x-auto">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th className="py-3 px-3">Lead Code</th>
+                        <th className="py-3 px-3">Name</th>
+                        <th className="py-3 px-3">Phone</th>
+                        <th className="py-3 px-3">Company / City</th>
+                        <th className="py-3 px-3">Stage</th>
+                        <th className="py-3 px-3">Priority</th>
+                        <th className="py-3 px-3 text-right">Deal Value</th>
+                        <th className="py-3 px-3 text-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                      {results.leads.map((ld) => (
+                        <tr key={ld.id} className="hover:bg-slate-50/70 transition-colors">
+                          <td className="py-3 px-3">
+                            {onNavigateToLead ? (
+                              <button
+                                onClick={() => onNavigateToLead(ld.id)}
+                                className="font-mono font-bold text-slate-800 bg-slate-100 hover:bg-slate-200 px-2 py-0.5 rounded border border-slate-300 transition-colors cursor-pointer"
+                              >
+                                {ld.lead_code}
+                              </button>
+                            ) : (
+                              <span className="font-mono font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                                {ld.lead_code}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3 px-3 font-semibold text-slate-900">{ld.customer_name}</td>
+                          <td className="py-3 px-3 font-mono text-slate-800">{ld.phone}</td>
+                          <td className="py-3 px-3">
+                            <div className="font-medium text-slate-800">{ld.company_name || '—'}</div>
+                            {ld.city && <div className="text-[11px] text-slate-400">{ld.city}</div>}
+                          </td>
+                          <td className="py-3 px-3">
+                            <span
+                              className="inline-block px-2 py-0.5 rounded-full text-[10px] font-bold border"
+                              style={{
+                                backgroundColor: ld.stage_color ? `${ld.stage_color}22` : '#f1f5f9',
+                                color: ld.stage_color || '#334155',
+                                borderColor: ld.stage_color ? `${ld.stage_color}55` : '#e2e8f0'
+                              }}
+                            >
+                              {ld.stage_name || 'Stage'}
+                            </span>
+                          </td>
+                          <td className="py-3 px-3">
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                ld.priority === 'Urgent'
+                                  ? 'bg-red-100 text-red-800'
+                                  : ld.priority === 'High'
+                                  ? 'bg-orange-100 text-orange-800'
+                                  : ld.priority === 'Medium'
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-slate-100 text-slate-700'
+                              }`}
+                            >
+                              {ld.priority}
+                            </span>
+                          </td>
+                          <td className="py-3 px-3 text-right font-mono font-bold text-emerald-700">
+                            ₹{Number(ld.estimated_deal_value || 0).toLocaleString()}
+                          </td>
+                          <td className="py-3 px-3 text-right">
+                            {onNavigateToLead && (
+                              <button
+                                onClick={() => onNavigateToLead(ld.id)}
+                                className="px-3 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-lg text-xs font-bold transition-all border border-emerald-200"
+                              >
+                                Open Lead
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           )}

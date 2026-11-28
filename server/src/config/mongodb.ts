@@ -12,8 +12,10 @@ try {
 export const ALL_TABLES = [
   'lead_sources',
   'funnel_stages',
+  'tags',
   'customers',
   'leads',
+  'lead_tags',
   'lead_activities',
   'follow_ups',
   'orders',
@@ -63,6 +65,12 @@ export async function connectMongoDB(): Promise<boolean> {
   if (!uri) {
     console.log('ℹ️ MONGODB_URI is not defined in environment variables. Running in local SQLite mode.');
     return false;
+  }
+
+  try {
+    dns.setServers(['8.8.8.8', '8.8.4.4']);
+  } catch {
+    // Ignore if not permitted
   }
 
   try {
@@ -123,6 +131,15 @@ async function initialBidirectionalSync() {
 /**
  * Sync all SQLite tables to MongoDB Atlas
  */
+function sanitizeRecordForMongo(table: string, record: any): any {
+  if (!record || typeof record !== 'object') return record;
+  if (table === 'users') {
+    const { password, ...safe } = record;
+    return safe;
+  }
+  return record;
+}
+
 export async function syncAllToMongo(): Promise<Record<string, number>> {
   if (!mongoose.connection.readyState) {
     throw new Error('MongoDB is not connected');
@@ -136,12 +153,13 @@ export async function syncAllToMongo(): Promise<Record<string, number>> {
       const col = mongoose.connection.collection(table);
 
       if (rows.length > 0) {
-        const ops = rows.map(r => {
-          const idVal = r.id || r.name || `${r.role_slug || ''}_${r.permission || ''}` || String(Date.now());
+        const ops = rows.map((r) => {
+          const safe = sanitizeRecordForMongo(table, r);
+          const idVal = safe.id || safe.name || `${safe.role_slug || ''}_${safe.permission || ''}` || String(Date.now());
           return {
             updateOne: {
               filter: { _id: idVal },
-              update: { $set: { ...r, _id: idVal } },
+              update: { $set: { ...safe, _id: idVal } },
               upsert: true
             }
           };
@@ -222,10 +240,11 @@ export function syncRecordToMongo(tableName: string, record: any): void {
   setImmediate(async () => {
     try {
       const col = mongoose.connection.collection(tableName);
-      const idVal = record.id || record.name || `${record.role_slug || ''}_${record.permission || ''}` || String(Date.now());
+      const safe = sanitizeRecordForMongo(tableName, record);
+      const idVal = safe.id || safe.name || `${safe.role_slug || ''}_${safe.permission || ''}` || String(Date.now());
       await col.updateOne(
         { _id: idVal as any },
-        { $set: { ...record, _id: idVal } },
+        { $set: { ...safe, _id: idVal } },
         { upsert: true }
       );
     } catch (err: any) {

@@ -138,6 +138,17 @@ export function initDatabase() {
     );
   `);
 
+  // Lead Tags catalog (admin-managed: Hot / Warm / Cold / custom)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tags (
+      id TEXT PRIMARY KEY,
+      name TEXT UNIQUE NOT NULL,
+      color TEXT DEFAULT '#10b981',
+      is_active INTEGER DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
   // Sales Funnel Stages table
   db.exec(`
     CREATE TABLE IF NOT EXISTS funnel_stages (
@@ -224,6 +235,22 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_leads_next_followup ON leads(next_followup_at);
   `);
 
+  // Lead ↔ Tag assignments (after leads exist for FK)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS lead_tags (
+      id TEXT PRIMARY KEY,
+      lead_id TEXT NOT NULL,
+      tag_id TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(lead_id, tag_id),
+      FOREIGN KEY(lead_id) REFERENCES leads(id) ON DELETE CASCADE,
+      FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_lead_tags_lead ON lead_tags(lead_id);
+    CREATE INDEX IF NOT EXISTS idx_lead_tags_tag ON lead_tags(tag_id);
+  `);
+
   // Lead Activities Timeline
   db.exec(`
     CREATE TABLE IF NOT EXISTS lead_activities (
@@ -268,6 +295,22 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_follow_ups_user ON follow_ups(assigned_user_id);
   `);
 
+  // Follow-up Tags association
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS follow_up_tags (
+      id TEXT PRIMARY KEY,
+      follow_up_id TEXT NOT NULL,
+      tag_id TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(follow_up_id, tag_id),
+      FOREIGN KEY(follow_up_id) REFERENCES follow_ups(id) ON DELETE CASCADE,
+      FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_follow_up_tags_fup ON follow_up_tags(follow_up_id);
+    CREATE INDEX IF NOT EXISTS idx_follow_up_tags_tag ON follow_up_tags(tag_id);
+  `);
+
   // Orders table
   db.exec(`
     CREATE TABLE IF NOT EXISTS orders (
@@ -282,6 +325,7 @@ export function initDatabase() {
       quantity INTEGER DEFAULT 1,
       order_amount REAL NOT NULL,
       payment_status TEXT DEFAULT 'Pending' CHECK(payment_status IN ('Pending', 'Partial', 'Paid', 'Refunded')),
+      invoice_sent INTEGER DEFAULT 0,
       order_status TEXT DEFAULT 'Order Placed',
       start_location TEXT DEFAULT 'New York Logistics Center',
       current_location TEXT DEFAULT 'Processing Facility',
@@ -303,6 +347,25 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(order_status);
   `);
 
+  // Order Tracking History table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS order_tracking (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      order_status TEXT NOT NULL,
+      location TEXT NOT NULL,
+      remarks TEXT,
+      is_manual INTEGER DEFAULT 1,
+      courier_reference TEXT,
+      updated_by_id TEXT,
+      updated_by_name TEXT,
+      recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_order_tracking_order_id ON order_tracking(order_id);
+  `);
+
   // Safe table migration for existing database
   try {
     const existingColumns = (db.prepare("PRAGMA table_info(orders)").all() as any[]).map(c => c.name);
@@ -311,6 +374,11 @@ export function initDatabase() {
     }
     if (!existingColumns.includes('end_location')) {
       db.exec("ALTER TABLE orders ADD COLUMN end_location TEXT DEFAULT 'Customer Delivery Address'");
+    }
+    if (!existingColumns.includes('invoice_sent')) {
+      db.exec("ALTER TABLE orders ADD COLUMN invoice_sent INTEGER DEFAULT 0");
+      // Mark already-paid orders as invoice sent so dashboard has meaningful sample data
+      db.exec("UPDATE orders SET invoice_sent = 1 WHERE payment_status = 'Paid'");
     }
 
     // Update existing orders to English localization
@@ -418,25 +486,6 @@ export function initDatabase() {
     console.error('Migration error on orders table:', err);
   }
 
-  // Order Tracking History table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS order_tracking (
-      id TEXT PRIMARY KEY,
-      order_id TEXT NOT NULL,
-      order_status TEXT NOT NULL,
-      location TEXT NOT NULL,
-      remarks TEXT,
-      is_manual INTEGER DEFAULT 1,
-      courier_reference TEXT,
-      updated_by_id TEXT,
-      updated_by_name TEXT,
-      recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_order_tracking_order_id ON order_tracking(order_id);
-  `);
-
   // Audit Logs table
   db.exec(`
     CREATE TABLE IF NOT EXISTS audit_logs (
@@ -481,15 +530,17 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_web_forms_active ON web_forms(is_active);
   `);
 
-  // Auto-grant manage_forms to admin and manager
+  seedInitialData();
+
+  // Keep system role permission matrices in sync for newly added permission keys
   try {
     db.prepare("INSERT OR IGNORE INTO role_permissions (id, role_slug, permission) VALUES ('rp-admin-manage_forms', 'admin', 'manage_forms')").run();
     db.prepare("INSERT OR IGNORE INTO role_permissions (id, role_slug, permission) VALUES ('rp-manager-manage_forms', 'manager', 'manage_forms')").run();
+    db.prepare("INSERT OR IGNORE INTO role_permissions (id, role_slug, permission) VALUES ('rp-agent-view_analytics', 'agent', 'view_analytics')").run();
+    db.prepare("INSERT OR IGNORE INTO role_permissions (id, role_slug, permission) VALUES ('rp-manager-view_all_leads', 'manager', 'view_all_leads')").run();
   } catch (permErr) {
     console.error('Role permission sync note:', permErr);
   }
-
-  seedInitialData();
 }
 
 // Function to normalize phone numbers for robust search
@@ -533,7 +584,7 @@ function seedInitialData() {
           'view_analytics', 'view_leads', 'view_all_leads', 'create_leads', 'edit_leads',
           'convert_leads', 'bulk_actions', 'view_pipeline', 'move_pipeline_stages',
           'manage_stages', 'view_orders', 'create_orders', 'update_order_location',
-          'view_customers', 'edit_customers', 'manage_followups'
+          'view_customers', 'edit_customers', 'manage_followups', 'manage_forms'
         ]
       },
       {
@@ -544,7 +595,7 @@ function seedInitialData() {
         color: '#64748b', // Slate
         is_system: 1,
         permissions: [
-          'view_leads', 'create_leads', 'edit_leads', 'convert_leads',
+          'view_analytics', 'view_leads', 'create_leads', 'edit_leads', 'convert_leads',
           'view_pipeline', 'move_pipeline_stages', 'view_orders',
           'view_customers', 'manage_followups'
         ]
@@ -585,6 +636,15 @@ function seedInitialData() {
     insertUser.run('usr-mgr-1', 'Sarah Jenkins (Sales Head)', 'manager@crmx.io', managerPassword, 'manager', '+1 (555) 014-9283', 'https://images.unsplash.com/photo-1580489944761-15a19d654956?w=150');
     insertUser.run('usr-agt-1', 'Alex Turner (Senior Agent)', 'agent@crmx.io', agentPassword, 'agent', '+1 (555) 017-8294', 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150');
     insertUser.run('usr-agt-2', 'Emma Wilson (Agent)', 'emma@crmx.io', agentPassword, 'agent', '+1 (555) 016-3728', 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=150');
+  }
+
+  // Default lead tags
+  const existingTags = db.prepare('SELECT count(*) as count FROM tags').get() as { count: number };
+  if (existingTags.count === 0) {
+    const insertTag = db.prepare('INSERT INTO tags (id, name, color) VALUES (?, ?, ?)');
+    insertTag.run('tag-hot', 'Hot Lead', '#ef4444');
+    insertTag.run('tag-warm', 'Warm Lead', '#f59e0b');
+    insertTag.run('tag-cold', 'Cold Lead', '#3b82f6');
   }
 
   // Lead Sources
@@ -660,9 +720,9 @@ function seedInitialData() {
     // 2. Orders for Customer 1
     const order1Id = 'ord-5001';
     db.prepare(`
-      INSERT INTO orders (id, order_code, customer_id, customer_name, customer_phone, customer_phone_normalized, product_name, quantity, order_amount, payment_status, order_status, start_location, current_location, end_location, assigned_staff_id, created_by)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(order1Id, 'ORD-5001', custId, 'Robert Miller', custPhone, normPhone, 'Enterprise CRM Suite Annual License', 1, 60000, 'Paid', 'In Transit', 'New York Logistics Center (Warehouse A)', 'Chicago Distribution Center', '742 Evergreen Terrace, New York, NY (Customer Address)', 'usr-agt-1', 'usr-admin-1');
+      INSERT INTO orders (id, order_code, customer_id, customer_name, customer_phone, customer_phone_normalized, product_name, quantity, order_amount, payment_status, invoice_sent, order_status, start_location, current_location, end_location, assigned_staff_id, created_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(order1Id, 'ORD-5001', custId, 'Robert Miller', custPhone, normPhone, 'Enterprise CRM Suite Annual License', 1, 60000, 'Paid', 1, 'In Transit', 'New York Logistics Center (Warehouse A)', 'Chicago Distribution Center', '742 Evergreen Terrace, New York, NY (Customer Address)', 'usr-agt-1', 'usr-admin-1');
 
     // Order 1 tracking
     db.prepare(`
@@ -676,9 +736,9 @@ function seedInitialData() {
 
     const order2Id = 'ord-5002';
     db.prepare(`
-      INSERT INTO orders (id, order_code, customer_id, customer_name, customer_phone, customer_phone_normalized, product_name, quantity, order_amount, payment_status, order_status, start_location, current_location, end_location, assigned_staff_id, created_by)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(order2Id, 'ORD-5002', custId, 'Robert Miller', custPhone, normPhone, 'Dedicated Cloud Backup Addon', 1, 25000, 'Paid', 'Confirmed', 'Austin Tech Logistics Depot', 'Boston Fulfillment Hub', 'Suite 400, 100 Broadway, New York, NY (Corporate Office)', 'usr-agt-1', 'usr-admin-1');
+      INSERT INTO orders (id, order_code, customer_id, customer_name, customer_phone, customer_phone_normalized, product_name, quantity, order_amount, payment_status, invoice_sent, order_status, start_location, current_location, end_location, assigned_staff_id, created_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(order2Id, 'ORD-5002', custId, 'Robert Miller', custPhone, normPhone, 'Dedicated Cloud Backup Addon', 1, 25000, 'Partial', 0, 'Confirmed', 'Austin Tech Logistics Depot', 'Boston Fulfillment Hub', 'Suite 400, 100 Broadway, New York, NY (Corporate Office)', 'usr-agt-1', 'usr-admin-1');
 
     db.prepare(`
       INSERT INTO order_tracking (id, order_id, order_status, location, remarks, updated_by_id, updated_by_name)

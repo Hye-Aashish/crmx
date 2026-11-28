@@ -1,22 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import {
   Users2,
-  UserCheck,
   PackageCheck,
   TrendingUp,
   Clock,
-  ArrowUpRight,
-  Filter,
-  Calendar,
   AlertCircle,
-  CheckCircle2,
   ChevronRight,
-  PhoneCall,
-  DollarSign,
-  Activity,
   Layers,
-  MapPin,
-  Truck
+  FileText,
+  Wallet,
+  Calendar
 } from 'lucide-react';
 import { api } from '../services/api';
 import { DashboardMetrics } from '../types';
@@ -25,15 +18,31 @@ interface DashboardProps {
   onNavigate: (tab: string, filter?: string) => void;
 }
 
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const daysAgoISO = (days: number) => {
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  return d.toISOString().slice(0, 10);
+};
+
 export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
   const [range, setRange] = useState<string>('30d');
+  const [customFrom, setCustomFrom] = useState<string>(daysAgoISO(30));
+  const [customTo, setCustomTo] = useState<string>(todayISO());
+  const [appliedFrom, setAppliedFrom] = useState<string>('');
+  const [appliedTo, setAppliedTo] = useState<string>('');
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState<boolean>(true);
 
   const fetchAnalytics = async () => {
+    if (range === 'custom' && (!appliedFrom || !appliedTo)) return;
     setLoading(true);
     try {
-      const res = await api.getAnalytics(range);
+      const res = await api.getAnalytics(
+        range,
+        range === 'custom' ? appliedFrom : undefined,
+        range === 'custom' ? appliedTo : undefined
+      );
       setData(res);
     } catch (err) {
       console.error('Error fetching analytics:', err);
@@ -44,75 +53,146 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
 
   useEffect(() => {
     fetchAnalytics();
-  }, [range]);
+  }, [range, appliedFrom, appliedTo]);
+
+  const handleSelectRange = (id: string) => {
+    setRange(id);
+    if (id !== 'custom') {
+      setAppliedFrom('');
+      setAppliedTo('');
+    }
+  };
+
+  const handleApplyCustom = () => {
+    if (!customFrom || !customTo) return;
+    const from = customFrom <= customTo ? customFrom : customTo;
+    const to = customFrom <= customTo ? customTo : customFrom;
+    setCustomFrom(from);
+    setCustomTo(to);
+    setAppliedFrom(from);
+    setAppliedTo(to);
+    setRange('custom');
+  };
 
   const metrics: DashboardMetrics = data?.metrics || {
     totalLeads: 0,
-    activeLeads: 0,
-    convertedLeads: 0,
+    pendingFollowUps: 0,
+    overdueFollowUpsCount: 0,
+    invoicesSent: 0,
+    invoicesPending: 0,
+    duePayments: 0,
+    duePaymentAmount: 0,
     totalOrders: 0,
-    totalRevenue: 0,
-    conversionRate: '0.0'
+    totalRevenue: 0
   };
 
   return (
-    <div className="p-4 sm:p-6 max-w-7xl mx-auto space-y-6 animate-fade-in">
+    <div className="page-wrap space-y-5 sm:space-y-6">
       {/* Top Banner & Date Filter */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="flex flex-col gap-3 sm:gap-4">
         <div>
-          <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight flex items-center gap-2">
-            <TrendingUp className="w-6 h-6 text-emerald-600" />
-            CRM & Order Fulfillment Dashboard
+          <h1 className="font-display text-xl sm:text-2xl font-extrabold text-slate-900 tracking-tight flex items-center gap-2">
+            <span className="inline-flex items-center justify-center w-9 h-9 sm:w-10 sm:h-10 rounded-2xl bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100 shrink-0">
+              <TrendingUp className="w-5 h-5 sm:w-5 sm:h-5" />
+            </span>
+            <span className="leading-tight">CRM & Order Fulfillment Dashboard</span>
           </h1>
-          <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
+          <p className="text-xs sm:text-sm text-slate-500 mt-1 sm:ml-[3.25rem]">
             Real-time pipeline metrics, conversion performance & 3-location order tracking.
           </p>
         </div>
 
-        {/* Date Filter Pills */}
-        <div className="flex items-center gap-1.5 p-1 bg-white border border-slate-200 rounded-xl shadow-xs self-start sm:self-auto">
-          {[
-            { id: 'today', label: 'Today' },
-            { id: '7d', label: 'Last 7 Days' },
-            { id: '30d', label: 'This Month' },
-            { id: 'last_month', label: 'Last Month' },
-            { id: 'all', label: 'All Time' }
-          ].map((item) => (
-            <button
-              key={item.id}
-              onClick={() => setRange(item.id)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                range === item.id
-                  ? 'bg-emerald-600 text-white shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-              }`}
-            >
-              {item.label}
-            </button>
-          ))}
+        {/* Date Filter Pills + Custom Range */}
+        <div className="w-full space-y-2">
+          <div className="flex flex-wrap items-center gap-1.5 p-1 bg-white/90 backdrop-blur-sm border border-emerald-900/5 rounded-2xl shadow-[0_8px_24px_rgba(16,185,129,0.05)]">
+            {[
+              { id: 'today', label: 'Today' },
+              { id: '7d', label: 'Last 7 Days' },
+              { id: '30d', label: 'This Month' },
+              { id: 'last_month', label: 'Last Month' },
+              { id: 'all', label: 'All Time' },
+              { id: 'custom', label: 'Custom' }
+            ].map((item) => (
+              <button
+                key={item.id}
+                onClick={() => handleSelectRange(item.id)}
+                className={`px-2.5 sm:px-3 py-1.5 rounded-xl text-[11px] sm:text-xs font-semibold transition-all ${
+                  range === item.id
+                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                }`}
+              >
+                {item.id === 'custom' ? (
+                  <span className="inline-flex items-center gap-1">
+                    <Calendar className="w-3 h-3" />
+                    {item.label}
+                  </span>
+                ) : (
+                  item.label
+                )}
+              </button>
+            ))}
+          </div>
+
+          {range === 'custom' && (
+            <div className="flex flex-col sm:flex-row sm:items-end gap-2 p-3 bg-white border border-emerald-200 rounded-xl shadow-xs">
+              <div className="flex-1 min-w-0">
+                <label className="block text-[11px] font-bold text-slate-500 mb-1">From Date</label>
+                <input
+                  type="date"
+                  value={customFrom}
+                  max={customTo || todayISO()}
+                  onChange={(e) => setCustomFrom(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium text-slate-800 focus:outline-none focus:border-emerald-600"
+                />
+              </div>
+              <div className="flex-1 min-w-0">
+                <label className="block text-[11px] font-bold text-slate-500 mb-1">To Date</label>
+                <input
+                  type="date"
+                  value={customTo}
+                  min={customFrom}
+                  max={todayISO()}
+                  onChange={(e) => setCustomTo(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium text-slate-800 focus:outline-none focus:border-emerald-600"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={handleApplyCustom}
+                disabled={!customFrom || !customTo}
+                className="w-full sm:w-auto px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-bold rounded-lg transition-colors"
+              >
+                Apply Range
+              </button>
+              {appliedFrom && appliedTo && (
+                <p className="text-[11px] text-emerald-700 font-semibold sm:pb-2 sm:whitespace-nowrap">
+                  {appliedFrom} → {appliedTo}
+                </p>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
-      {/* 4 Primary Analytics Cards (Green Theme) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-5">
+      {/* Primary KPI Cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-5">
         {/* 1. Total Leads */}
         <div
           onClick={() => onNavigate('leads')}
-          className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs hover:border-emerald-300 transition-all cursor-pointer relative overflow-hidden group"
+          className="crm-card p-3.5 sm:p-5 hover:border-emerald-300 hover:-translate-y-0.5 transition-all cursor-pointer relative overflow-hidden group"
         >
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Total Leads</span>
-            <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center group-hover:scale-110 transition-transform">
-              <Users2 className="w-5 h-5" />
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] sm:text-xs font-bold uppercase tracking-wider text-slate-400">Total Leads</span>
+            <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center group-hover:scale-110 transition-transform shrink-0">
+              <Users2 className="w-4 h-4 sm:w-5 sm:h-5" />
             </div>
           </div>
-          <div className="mt-4 flex items-baseline gap-2">
-            <span className="text-3xl font-extrabold text-slate-900">
+          <div className="mt-3 sm:mt-4 flex items-baseline gap-2 flex-wrap">
+            <span className="text-2xl sm:text-3xl font-extrabold text-slate-900">
               {loading ? '...' : metrics.totalLeads}
             </span>
-            <span className="text-xs text-emerald-700 font-semibold flex items-center">
-              Active Pipeline
-            </span>
+            <span className="text-[10px] sm:text-xs text-emerald-700 font-semibold">All time range</span>
           </div>
           <div className="mt-3 flex items-center text-xs text-slate-500 font-medium">
             <span>View all leads</span>
@@ -121,71 +201,104 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
           <div className="absolute top-0 left-0 right-0 h-1 bg-emerald-600"></div>
         </div>
 
-        {/* 2. Active Leads */}
+        {/* 2. Follow-ups Pending */}
         <div
-          onClick={() => onNavigate('pipeline')}
-          className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs hover:border-emerald-300 transition-all cursor-pointer relative overflow-hidden group"
+          onClick={() => onNavigate('followups', metrics.overdueFollowUpsCount > 0 ? 'overdue' : 'today')}
+          className="crm-card p-3.5 sm:p-5 hover:border-amber-300 hover:-translate-y-0.5 transition-all cursor-pointer relative overflow-hidden group"
         >
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Active Leads</span>
-            <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center group-hover:scale-110 transition-transform">
-              <Clock className="w-5 h-5" />
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] sm:text-xs font-bold uppercase tracking-wider text-slate-400">Follow-ups</span>
+            <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-amber-50 text-amber-700 flex items-center justify-center group-hover:scale-110 transition-transform shrink-0">
+              <Clock className="w-4 h-4 sm:w-5 sm:h-5" />
             </div>
           </div>
-          <div className="mt-4 flex items-baseline gap-2">
-            <span className="text-3xl font-extrabold text-slate-900">
-              {loading ? '...' : metrics.activeLeads}
+          <div className="mt-3 sm:mt-4 flex items-baseline gap-2 flex-wrap">
+            <span className="text-2xl sm:text-3xl font-extrabold text-slate-900">
+              {loading ? '...' : metrics.pendingFollowUps}
             </span>
-            <span className="text-xs text-emerald-800 font-semibold">
-              In Stages
-            </span>
+            {metrics.overdueFollowUpsCount > 0 ? (
+              <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-700">
+                {metrics.overdueFollowUpsCount} overdue
+              </span>
+            ) : (
+              <span className="text-xs text-amber-700 font-semibold">Pending</span>
+            )}
           </div>
           <div className="mt-3 flex items-center text-xs text-slate-500 font-medium">
-            <span>View Kanban Pipeline</span>
+            <span>People to follow up</span>
             <ChevronRight className="w-3.5 h-3.5 ml-auto text-slate-400 group-hover:translate-x-1 transition-transform" />
           </div>
-          <div className="absolute top-0 left-0 right-0 h-1 bg-emerald-700"></div>
+          <div className="absolute top-0 left-0 right-0 h-1 bg-amber-500"></div>
         </div>
 
-        {/* 3. Converted Leads */}
+        {/* 3. Invoice Sent */}
         <div
-          onClick={() => onNavigate('customers')}
-          className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs hover:border-emerald-300 transition-all cursor-pointer relative overflow-hidden group"
+          onClick={() => onNavigate('orders', 'invoice_pending')}
+          className="crm-card p-3.5 sm:p-5 hover:border-teal-300 hover:-translate-y-0.5 transition-all cursor-pointer relative overflow-hidden group"
         >
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Converted Leads</span>
-            <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-800 flex items-center justify-center group-hover:scale-110 transition-transform">
-              <UserCheck className="w-5 h-5" />
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] sm:text-xs font-bold uppercase tracking-wider text-slate-400">Invoice Send</span>
+            <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-sky-50 text-sky-700 flex items-center justify-center group-hover:scale-110 transition-transform shrink-0">
+              <FileText className="w-4 h-4 sm:w-5 sm:h-5" />
             </div>
           </div>
-          <div className="mt-4 flex items-baseline gap-2">
-            <span className="text-3xl font-extrabold text-slate-900">
-              {loading ? '...' : metrics.convertedLeads}
+          <div className="mt-3 sm:mt-4 flex items-baseline gap-2 flex-wrap">
+            <span className="text-2xl sm:text-3xl font-extrabold text-slate-900">
+              {loading ? '...' : metrics.invoicesSent}
             </span>
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
-              {metrics.conversionRate}% Conversion
+              Sent
+            </span>
+            <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
+              {loading ? '...' : metrics.invoicesPending} not sent
             </span>
           </div>
           <div className="mt-3 flex items-center text-xs text-slate-500 font-medium">
-            <span>View customers</span>
+            <span>View pending invoices</span>
             <ChevronRight className="w-3.5 h-3.5 ml-auto text-slate-400 group-hover:translate-x-1 transition-transform" />
           </div>
-          <div className="absolute top-0 left-0 right-0 h-1 bg-emerald-500"></div>
+          <div className="absolute top-0 left-0 right-0 h-1 bg-sky-500"></div>
         </div>
 
-        {/* 4. Total Orders */}
+        {/* 4. Due Payment */}
         <div
-          onClick={() => onNavigate('orders')}
-          className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs hover:border-emerald-300 transition-all cursor-pointer relative overflow-hidden group"
+          onClick={() => onNavigate('orders', 'due_payment')}
+          className="crm-card p-3.5 sm:p-5 hover:border-rose-300 hover:-translate-y-0.5 transition-all cursor-pointer relative overflow-hidden group"
         >
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Total Orders</span>
-            <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center group-hover:scale-110 transition-transform">
-              <PackageCheck className="w-5 h-5" />
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] sm:text-xs font-bold uppercase tracking-wider text-slate-400">Due Payment</span>
+            <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-rose-50 text-rose-700 flex items-center justify-center group-hover:scale-110 transition-transform shrink-0">
+              <Wallet className="w-4 h-4 sm:w-5 sm:h-5" />
             </div>
           </div>
-          <div className="mt-4 flex items-baseline gap-2">
-            <span className="text-3xl font-extrabold text-slate-900">
+          <div className="mt-3 sm:mt-4 flex items-baseline gap-2 flex-wrap">
+            <span className="text-2xl sm:text-3xl font-extrabold text-slate-900">
+              {loading ? '...' : metrics.duePayments}
+            </span>
+            <span className="text-xs text-rose-700 font-bold font-mono">
+              ₹{(metrics.duePaymentAmount || 0).toLocaleString()}
+            </span>
+          </div>
+          <div className="mt-3 flex items-center text-xs text-slate-500 font-medium">
+            <span>Pending / partial dues</span>
+            <ChevronRight className="w-3.5 h-3.5 ml-auto text-slate-400 group-hover:translate-x-1 transition-transform" />
+          </div>
+          <div className="absolute top-0 left-0 right-0 h-1 bg-rose-500"></div>
+        </div>
+
+        {/* 5. Total Orders */}
+        <div
+          onClick={() => onNavigate('orders')}
+          className="crm-card p-3.5 sm:p-5 hover:border-emerald-300 hover:-translate-y-0.5 transition-all cursor-pointer relative overflow-hidden group"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] sm:text-xs font-bold uppercase tracking-wider text-slate-400">Total Orders</span>
+            <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center group-hover:scale-110 transition-transform shrink-0">
+              <PackageCheck className="w-4 h-4 sm:w-5 sm:h-5" />
+            </div>
+          </div>
+          <div className="mt-3 sm:mt-4 flex items-baseline gap-2 flex-wrap">
+            <span className="text-2xl sm:text-3xl font-extrabold text-slate-900">
               {loading ? '...' : metrics.totalOrders}
             </span>
             <span className="text-xs text-emerald-700 font-bold font-mono">
@@ -203,10 +316,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
       {/* Sales Funnel Overview & Overdue Reminders Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Sales Funnel Pipeline Stage Summary (2 cols) */}
-        <div className="lg:col-span-2 bg-white p-6 rounded-2xl border border-slate-200/80 shadow-xs">
+        <div className="lg:col-span-2 crm-card p-6">
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+              <h2 className="font-display text-base font-bold text-slate-900 flex items-center gap-2">
                 <Layers className="w-4 h-4 text-emerald-600" />
                 Sales Funnel & Stage Breakdown
               </h2>

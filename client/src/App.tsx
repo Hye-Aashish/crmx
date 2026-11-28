@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { AuthProvider, useAuth } from './context/AuthContext';
+import { useAuth } from './context/AuthContext';
 import { Sidebar } from './components/Sidebar';
 import { Navbar } from './components/Navbar';
 import { Dashboard } from './pages/Dashboard';
@@ -10,31 +10,13 @@ import { Customers } from './pages/Customers';
 import { Orders } from './pages/Orders';
 import { GlobalSearch } from './pages/GlobalSearch';
 import { UsersPage } from './pages/Users';
-import { FormBuilder } from './pages/FormBuilder';
-import { PublicForm } from './pages/PublicForm';
 import { Login } from './pages/Login';
 
-const getPublicFormParam = (): string | null => {
-  if (typeof window === 'undefined') return null;
-  const searchParams = new URLSearchParams(window.location.search);
-  const qForm = searchParams.get('form');
-  if (qForm) return qForm;
-
-  if (window.location.hash) {
-    const hashMatch = window.location.hash.match(/^#\/?form\/([^/?#]+)/);
-    if (hashMatch && hashMatch[1]) return hashMatch[1];
-  }
-
-  const pathMatch = window.location.pathname.match(/^\/form\/([^/?#]+)/);
-  if (pathMatch && pathMatch[1]) return pathMatch[1];
-
-  return null;
-};
-
 const MainLayout: React.FC = () => {
-  const { user, isLoading } = useAuth();
+  const { user, isLoading, hasPermission } = useAuth();
   const [currentTab, setCurrentTab] = useState<string>('dashboard');
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState<boolean>(false);
 
   // Search state
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -42,10 +24,33 @@ const MainLayout: React.FC = () => {
   // Navigations with params
   const [selectedOrderId, setSelectedOrderId] = useState<string | undefined>(undefined);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | undefined>(undefined);
+  const [selectedLeadId, setSelectedLeadId] = useState<string | undefined>(undefined);
   const [selectedCustomerIdForOrder, setSelectedCustomerIdForOrder] = useState<string | undefined>(undefined);
+  const [ordersFilter, setOrdersFilter] = useState<string | undefined>(undefined);
+  const [followupsTab, setFollowupsTab] = useState<'today' | 'upcoming' | 'overdue' | 'completed' | undefined>(undefined);
 
   // Modal triggers
-  const [openLeadModalTrigger, setOpenLeadModalTrigger] = useState(false);
+  const [openLeadModalTrigger, setOpenLeadModalTrigger] = useState(0);
+
+  // Must run before any early return (Rules of Hooks)
+  useEffect(() => {
+    if (!user) return;
+    const permittedTabs = [
+      hasPermission('view_analytics') && 'dashboard',
+      hasPermission('view_leads') && 'leads',
+      hasPermission('view_pipeline') && 'pipeline',
+      hasPermission('manage_followups') && 'followups',
+      hasPermission('view_customers') && 'customers',
+      hasPermission('view_orders') && 'orders',
+      'search',
+      (hasPermission('manage_roles') || hasPermission('manage_users')) && 'users'
+    ].filter(Boolean) as string[];
+
+    if (!permittedTabs.includes(currentTab) && permittedTabs[0]) {
+      setCurrentTab(permittedTabs[0]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, user?.role, user?.permissions, currentTab]);
 
   if (isLoading) {
     return (
@@ -67,9 +72,34 @@ const MainLayout: React.FC = () => {
     setCurrentTab('search');
   };
 
+  const handleSetCurrentTab = (tab: string) => {
+    if (tab === 'orders') {
+      setOrdersFilter(undefined);
+      setSelectedOrderId(undefined);
+    }
+    if (tab === 'followups') {
+      setFollowupsTab(undefined);
+    }
+    setCurrentTab(tab);
+    setMobileSidebarOpen(false);
+  };
+
   const handleNavigate = (tab: string, param?: string) => {
-    if (tab === 'orders' && param) {
-      setSelectedOrderId(param);
+    if (tab === 'orders') {
+      if (param === 'invoice_pending' || param === 'invoice_sent' || param === 'due_payment') {
+        setOrdersFilter(param);
+        setSelectedOrderId(undefined);
+      } else if (param) {
+        setSelectedOrderId(param);
+        setOrdersFilter(undefined);
+      } else {
+        setOrdersFilter(undefined);
+      }
+    }
+    if (tab === 'followups' && param) {
+      if (param === 'today' || param === 'upcoming' || param === 'overdue' || param === 'completed') {
+        setFollowupsTab(param);
+      }
     }
     if (tab === 'customers' && param) {
       setSelectedCustomerId(param);
@@ -78,23 +108,26 @@ const MainLayout: React.FC = () => {
   };
 
   return (
-    <div className="flex h-screen bg-slate-50 text-slate-800 overflow-hidden font-sans">
-      {/* Collapsible Sidebar */}
+    <div className="flex h-[100dvh] text-slate-800 overflow-hidden font-sans app-shell">
+      {/* Collapsible / Mobile Drawer Sidebar */}
       <Sidebar
         currentTab={currentTab}
-        setCurrentTab={setCurrentTab}
+        setCurrentTab={handleSetCurrentTab}
         collapsed={sidebarCollapsed}
         setCollapsed={setSidebarCollapsed}
+        mobileOpen={mobileSidebarOpen}
+        onMobileClose={() => setMobileSidebarOpen(false)}
       />
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden w-full app-main">
         {/* Universal Top Header with Live Search Omnibar */}
         <Navbar
+          onMenuClick={() => setMobileSidebarOpen(true)}
           onSearch={handleGlobalSearch}
           openCreateLeadModal={() => {
             setCurrentTab('leads');
-            setOpenLeadModalTrigger(true);
+            setOpenLeadModalTrigger(Date.now());
           }}
           openCreateOrderModal={() => {
             setSelectedCustomerIdForOrder(undefined);
@@ -109,12 +142,13 @@ const MainLayout: React.FC = () => {
             setCurrentTab('orders');
           }}
           onSelectLead={(lId) => {
+            setSelectedLeadId(lId);
             setCurrentTab('leads');
           }}
         />
 
         {/* Dynamic Page Views */}
-        <main className="flex-1 overflow-y-auto">
+        <main className="flex-1 overflow-y-auto overflow-x-hidden overscroll-y-contain">
           {currentTab === 'dashboard' && <Dashboard onNavigate={handleNavigate} />}
           {currentTab === 'leads' && (
             <Leads
@@ -123,6 +157,7 @@ const MainLayout: React.FC = () => {
                 setCurrentTab('customers');
               }}
               openCreateModalTrigger={openLeadModalTrigger}
+              initialLeadId={selectedLeadId}
             />
           )}
           {currentTab === 'pipeline' && (
@@ -133,7 +168,7 @@ const MainLayout: React.FC = () => {
               }}
             />
           )}
-          {currentTab === 'followups' && <FollowUps />}
+          {currentTab === 'followups' && <FollowUps initialTab={followupsTab} />}
           {currentTab === 'customers' && (
             <Customers
               initialCustomerId={selectedCustomerId}
@@ -154,6 +189,7 @@ const MainLayout: React.FC = () => {
             <Orders
               initialOrderId={selectedOrderId}
               preselectedCustomerId={selectedCustomerIdForOrder}
+              initialFilter={ordersFilter}
             />
           )}
           {currentTab === 'search' && (
@@ -167,10 +203,14 @@ const MainLayout: React.FC = () => {
                 setSelectedOrderId(oId);
                 setCurrentTab('orders');
               }}
+              onNavigateToLead={(lId) => {
+                setSelectedLeadId(lId);
+                setCurrentTab('leads');
+              }}
             />
           )}
-          {currentTab === 'forms' && <FormBuilder />}
-          {currentTab === 'users' && <UsersPage />}
+          {currentTab === 'users' &&
+            (hasPermission('manage_roles') || hasPermission('manage_users')) && <UsersPage />}
         </main>
       </div>
     </div>
@@ -178,27 +218,5 @@ const MainLayout: React.FC = () => {
 };
 
 export default function App() {
-  const [publicFormId, setPublicFormId] = useState<string | null>(() => getPublicFormParam());
-
-  useEffect(() => {
-    const handleUrlChange = () => {
-      setPublicFormId(getPublicFormParam());
-    };
-    window.addEventListener('popstate', handleUrlChange);
-    window.addEventListener('hashchange', handleUrlChange);
-    return () => {
-      window.removeEventListener('popstate', handleUrlChange);
-      window.removeEventListener('hashchange', handleUrlChange);
-    };
-  }, []);
-
-  if (publicFormId) {
-    return <PublicForm formIdOrSlug={publicFormId} />;
-  }
-
-  return (
-    <AuthProvider>
-      <MainLayout />
-    </AuthProvider>
-  );
+  return <MainLayout />;
 }

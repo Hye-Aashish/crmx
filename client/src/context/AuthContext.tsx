@@ -8,7 +8,7 @@ interface AuthContextType {
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
   isLoading: boolean;
-  switchRole: (role: 'admin' | 'manager' | 'agent') => Promise<void>;
+  hasPermission: (permission: string) => boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -28,6 +28,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setToken(savedToken);
         } catch (err) {
           localStorage.removeItem('crmx_token');
+          localStorage.removeItem('crmx_user');
           setUser(null);
           setToken(null);
         }
@@ -52,22 +53,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(null);
   };
 
-  const switchRole = async (role: 'admin' | 'manager' | 'agent') => {
-    const creds: Record<string, string> = {
-      admin: 'admin@crmx.io',
-      manager: 'manager@crmx.io',
-      agent: 'agent@crmx.io'
-    };
-    const passwords: Record<string, string> = {
-      admin: 'admin123',
-      manager: 'manager123',
-      agent: 'agent123'
-    };
-    await login(creds[role], passwords[role]);
+  const hasPermission = (permission: string) => {
+    if (!user) return false;
+    if (user.role === 'admin') return true;
+    return !!user.permissions?.includes(permission);
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, login, logout, isLoading, switchRole }}>
+    <AuthContext.Provider value={{ user, token, login, logout, isLoading, hasPermission }}>
       {children}
     </AuthContext.Provider>
   );

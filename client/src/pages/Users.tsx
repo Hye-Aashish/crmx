@@ -18,22 +18,31 @@ import {
   Layers,
   Sparkles,
   AlertTriangle,
-  RefreshCw
+  RefreshCw,
+  Tag,
+  Pencil
 } from 'lucide-react';
 import { api } from '../services/api';
-import { User, Role, PermissionDef } from '../types';
+import { User, Role, PermissionDef, LeadTag } from '../types';
 import { useAuth } from '../context/AuthContext';
 
 export const UsersPage: React.FC = () => {
   const { user: currentUser } = useAuth();
-  const [activeTab, setActiveTab] = useState<'users' | 'roles'>('users');
+  const [activeTab, setActiveTab] = useState<'users' | 'roles' | 'tags'>('users');
   
   // Data states
   const [users, setUsers] = useState<User[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
   const [permissionsList, setPermissionsList] = useState<PermissionDef[]>([]);
+  const [tags, setTags] = useState<LeadTag[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchUserQuery, setSearchUserQuery] = useState('');
+
+  // Tag management
+  const [showTagModal, setShowTagModal] = useState(false);
+  const [editingTag, setEditingTag] = useState<LeadTag | null>(null);
+  const [tagForm, setTagForm] = useState({ name: '', color: '#ef4444' });
+  const [savingTag, setSavingTag] = useState(false);
 
   // Selected role for permissions matrix
   const [selectedRoleSlug, setSelectedRoleSlug] = useState<string>('agent');
@@ -68,14 +77,16 @@ export const UsersPage: React.FC = () => {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [uRes, rRes, pRes] = await Promise.all([
+      const [uRes, rRes, pRes, tRes] = await Promise.all([
         api.getUsers(),
         api.getRoles(),
-        api.getPermissions()
+        api.getPermissions(),
+        api.getTags(true)
       ]);
       setUsers(uRes || []);
       setRoles(rRes || []);
       setPermissionsList(pRes || []);
+      setTags(tRes || []);
 
       // Set initial selected role perms
       if (rRes && rRes.length > 0) {
@@ -87,6 +98,47 @@ export const UsersPage: React.FC = () => {
       console.error('Failed to load access control data:', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const openCreateTag = () => {
+    setEditingTag(null);
+    setTagForm({ name: '', color: '#ef4444' });
+    setShowTagModal(true);
+  };
+
+  const openEditTag = (tag: LeadTag) => {
+    setEditingTag(tag);
+    setTagForm({ name: tag.name, color: tag.color || '#10b981' });
+    setShowTagModal(true);
+  };
+
+  const handleSaveTag = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!tagForm.name.trim()) return;
+    setSavingTag(true);
+    try {
+      if (editingTag) {
+        await api.updateTag(editingTag.id, { name: tagForm.name.trim(), color: tagForm.color, is_active: 1 });
+      } else {
+        await api.createTag({ name: tagForm.name.trim(), color: tagForm.color });
+      }
+      setShowTagModal(false);
+      loadData();
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setSavingTag(false);
+    }
+  };
+
+  const handleDeleteTag = async (tag: LeadTag) => {
+    if (!window.confirm(`Delete tag "${tag.name}"? It will be removed from all leads.`)) return;
+    try {
+      await api.deleteTag(tag.id);
+      loadData();
+    } catch (err: any) {
+      alert(err.message);
     }
   };
 
@@ -272,17 +324,17 @@ export const UsersPage: React.FC = () => {
   ];
 
   return (
-    <div className="p-6 max-w-7xl mx-auto space-y-6 animate-fade-in">
+    <div className="page-wrap">
       {/* Page Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="page-header">
         <div>
-          <h1 className="text-2xl font-black text-slate-900 tracking-tight flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center shadow-md shadow-emerald-600/20">
+          <h1 className="page-title">
+            <span className="title-icon !bg-emerald-600 !text-white !ring-emerald-500/30 shadow-lg shadow-emerald-600/25">
               <ShieldCheck className="w-5 h-5" />
-            </div>
-            Admin: Roles & Permissions Control
+            </span>
+            Roles & Permissions
           </h1>
-          <p className="text-xs sm:text-sm text-slate-500 mt-1">
+          <p className="page-subtitle sm:ml-[3.25rem]">
             Create custom roles, assign granular functional permissions, and manage staff access.
           </p>
         </div>
@@ -306,7 +358,7 @@ export const UsersPage: React.FC = () => {
               <UserPlus className="w-4 h-4" />
               Add Team Member
             </button>
-          ) : (
+          ) : activeTab === 'roles' ? (
             <button
               onClick={() => setShowCreateRoleModal(true)}
               className="btn-primary flex items-center gap-2"
@@ -314,22 +366,27 @@ export const UsersPage: React.FC = () => {
               <Plus className="w-4 h-4" />
               Create New Role
             </button>
+          ) : (
+            <button onClick={openCreateTag} className="btn-primary flex items-center gap-2">
+              <Plus className="w-4 h-4" />
+              Create Tag
+            </button>
           )}
         </div>
       </div>
 
       {/* Navigation Tabs */}
-      <div className="flex items-center gap-2 border-b border-slate-200">
+      <div className="flex flex-wrap items-center gap-2 border-b border-slate-200">
         <button
           onClick={() => setActiveTab('users')}
-          className={`flex items-center gap-2 px-5 py-3 font-bold text-xs border-b-2 transition-all ${
+          className={`flex items-center gap-2 px-4 sm:px-5 py-3 font-bold text-xs border-b-2 transition-all ${
             activeTab === 'users'
               ? 'border-emerald-600 text-emerald-700'
               : 'border-transparent text-slate-500 hover:text-slate-800'
           }`}
         >
           <Users className="w-4 h-4" />
-          <span>Team Members & Staff</span>
+          <span>Team Members</span>
           <span className="px-2 py-0.5 rounded-full text-[10px] bg-slate-100 font-mono text-slate-600 font-bold">
             {users.length}
           </span>
@@ -337,16 +394,31 @@ export const UsersPage: React.FC = () => {
 
         <button
           onClick={() => setActiveTab('roles')}
-          className={`flex items-center gap-2 px-5 py-3 font-bold text-xs border-b-2 transition-all ${
+          className={`flex items-center gap-2 px-4 sm:px-5 py-3 font-bold text-xs border-b-2 transition-all ${
             activeTab === 'roles'
               ? 'border-emerald-600 text-emerald-700'
               : 'border-transparent text-slate-500 hover:text-slate-800'
           }`}
         >
           <Key className="w-4 h-4" />
-          <span>Roles & Permissions Matrix</span>
+          <span>Roles</span>
           <span className="px-2 py-0.5 rounded-full text-[10px] bg-emerald-100 font-mono text-emerald-700 font-bold">
-            {roles.length} Roles
+            {roles.length}
+          </span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('tags')}
+          className={`flex items-center gap-2 px-4 sm:px-5 py-3 font-bold text-xs border-b-2 transition-all ${
+            activeTab === 'tags'
+              ? 'border-emerald-600 text-emerald-700'
+              : 'border-transparent text-slate-500 hover:text-slate-800'
+          }`}
+        >
+          <Tag className="w-4 h-4" />
+          <span>Lead Tags</span>
+          <span className="px-2 py-0.5 rounded-full text-[10px] bg-amber-100 font-mono text-amber-800 font-bold">
+            {tags.filter((t) => t.is_active !== 0).length}
           </span>
         </button>
       </div>
@@ -356,31 +428,31 @@ export const UsersPage: React.FC = () => {
         <div className="space-y-6">
           {/* Quick Metrics Bar */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="p-4 bg-white rounded-2xl border border-slate-200/80 shadow-xs">
+            <div className="kpi-tile">
               <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Total Users</div>
-              <div className="text-2xl font-black text-slate-900 mt-1">{users.length}</div>
+              <div className="text-2xl font-black text-slate-900 mt-1 font-display">{users.length}</div>
               <div className="text-[11px] text-emerald-600 font-semibold mt-0.5">Active accounts</div>
             </div>
 
-            <div className="p-4 bg-white rounded-2xl border border-slate-200/80 shadow-xs">
+            <div className="kpi-tile">
               <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">System Admins</div>
-              <div className="text-2xl font-black text-slate-900 mt-1">
+              <div className="text-2xl font-black text-slate-900 mt-1 font-display">
                 {users.filter((u) => u.role === 'admin').length}
               </div>
               <div className="text-[11px] text-slate-500 font-medium mt-0.5">Full unrestricted privileges</div>
             </div>
 
-            <div className="p-4 bg-white rounded-2xl border border-slate-200/80 shadow-xs">
+            <div className="kpi-tile">
               <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Sales Managers</div>
-              <div className="text-2xl font-black text-slate-900 mt-1">
+              <div className="text-2xl font-black text-slate-900 mt-1 font-display">
                 {users.filter((u) => u.role === 'manager').length}
               </div>
               <div className="text-[11px] text-teal-600 font-medium mt-0.5">Pipeline & tracking oversight</div>
             </div>
 
-            <div className="p-4 bg-white rounded-2xl border border-slate-200/80 shadow-xs">
+            <div className="kpi-tile">
               <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Agents & Custom Roles</div>
-              <div className="text-2xl font-black text-slate-900 mt-1">
+              <div className="text-2xl font-black text-slate-900 mt-1 font-display">
                 {users.filter((u) => u.role !== 'admin' && u.role !== 'manager').length}
               </div>
               <div className="text-[11px] text-slate-500 font-medium mt-0.5">Front-line operations</div>
@@ -388,8 +460,8 @@ export const UsersPage: React.FC = () => {
           </div>
 
           {/* Search and Table Filter */}
-          <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
-            <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div className="panel-flush">
+            <div className="p-4 border-b border-emerald-50 flex flex-col sm:flex-row items-center justify-between gap-3">
               <div className="relative w-full sm:w-80">
                 <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
                 <input
@@ -397,7 +469,7 @@ export const UsersPage: React.FC = () => {
                   placeholder="Filter users by name, email, role..."
                   value={searchUserQuery}
                   onChange={(e) => setSearchUserQuery(e.target.value)}
-                  className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-emerald-500"
+                  className="input-crm pl-9"
                 />
               </div>
 
@@ -593,7 +665,7 @@ export const UsersPage: React.FC = () => {
 
           {/* Permissions Matrix Panel */}
           {selectedRole && (
-            <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
+            <div className="panel-flush">
               {/* Header */}
               <div className="p-5 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-50/50">
                 <div>
@@ -741,6 +813,139 @@ export const UsersPage: React.FC = () => {
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {/* ================= TAB 3: LEAD TAGS ================= */}
+      {activeTab === 'tags' && (
+        <div className="space-y-4">
+          <div className="panel p-4 sm:p-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+              <div>
+                <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                  <Tag className="w-4 h-4 text-emerald-600" />
+                  Lead Tags Catalog
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Create tags like Hot Lead, Warm Lead, Cold Lead — assign multiple tags while creating or editing leads.
+                </p>
+              </div>
+              <button onClick={openCreateTag} className="btn-primary self-start">
+                <Plus className="w-4 h-4" />
+                New Tag
+              </button>
+            </div>
+
+            {loading ? (
+              <div className="py-10 text-center text-xs text-slate-400">Loading tags...</div>
+            ) : tags.filter((t) => t.is_active !== 0).length === 0 ? (
+              <div className="py-10 text-center text-xs text-slate-400 border border-dashed border-slate-200 rounded-xl">
+                No active tags yet. Create your first tag.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {tags
+                  .filter((t) => t.is_active !== 0)
+                  .map((tag) => (
+                    <div
+                      key={tag.id}
+                      className="flex items-center justify-between gap-3 p-3.5 rounded-xl border border-slate-200 bg-slate-50/60"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <span
+                          className="w-3.5 h-3.5 rounded-full shrink-0 ring-2 ring-white shadow-sm"
+                          style={{ backgroundColor: tag.color }}
+                        />
+                        <div className="min-w-0">
+                          <div className="text-xs font-bold text-slate-900 truncate">{tag.name}</div>
+                          <div className="text-[10px] text-slate-500 font-mono">
+                            {tag.lead_count || 0} lead(s)
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => openEditTag(tag)}
+                          className="p-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 hover:text-emerald-700"
+                          title="Edit tag"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteTag(tag)}
+                          className="p-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 hover:text-red-600"
+                          title="Delete tag"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Tag Create / Edit Modal */}
+      {showTagModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl border border-slate-100 animate-fade-in">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                <Tag className="w-4 h-4 text-emerald-600" />
+                {editingTag ? 'Edit Tag' : 'Create Tag'}
+              </h3>
+              <button onClick={() => setShowTagModal(false)} className="text-slate-400 hover:text-slate-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveTag} className="mt-4 space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Tag Name *</label>
+                <input
+                  type="text"
+                  required
+                  value={tagForm.name}
+                  onChange={(e) => setTagForm({ ...tagForm, name: e.target.value })}
+                  placeholder="e.g. Hot Lead"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-emerald-500"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1.5">Color</label>
+                <div className="flex flex-wrap items-center gap-2">
+                  {['#ef4444', '#f59e0b', '#3b82f6', '#10b981', '#8b5cf6', '#ec4899', '#64748b'].map((hex) => (
+                    <button
+                      key={hex}
+                      type="button"
+                      onClick={() => setTagForm({ ...tagForm, color: hex })}
+                      className={`w-7 h-7 rounded-full ${
+                        tagForm.color === hex ? 'ring-2 ring-slate-900 scale-110' : ''
+                      }`}
+                      style={{ backgroundColor: hex }}
+                    />
+                  ))}
+                  <input
+                    type="color"
+                    value={tagForm.color}
+                    onChange={(e) => setTagForm({ ...tagForm, color: e.target.value })}
+                    className="w-8 h-8 rounded cursor-pointer border border-slate-200"
+                  />
+                </div>
+              </div>
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+                <button type="button" onClick={() => setShowTagModal(false)} className="btn-secondary">
+                  Cancel
+                </button>
+                <button type="submit" disabled={savingTag} className="btn-primary">
+                  {savingTag ? 'Saving...' : editingTag ? 'Save Tag' : 'Create Tag'}
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 

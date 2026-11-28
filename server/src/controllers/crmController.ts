@@ -1,10 +1,170 @@
 import { Response } from 'express';
 import { db, normalizePhone, AVAILABLE_PERMISSIONS } from '../config/database';
-import { AuthenticatedRequest } from '../middleware/auth';
+import { AuthenticatedRequest, AuthUser, canViewAllLeads, hasPermission } from '../middleware/auth';
 import { syncRecordToMongo, deleteRecordFromMongo } from '../config/mongodb';
 import bcrypt from 'bcryptjs';
 
+const VALID_PERMISSION_IDS = new Set(AVAILABLE_PERMISSIONS.map((p) => p.id));
+
+function sanitizePermissions(permissions: unknown): string[] {
+  if (!Array.isArray(permissions)) return [];
+  return Array.from(
+    new Set(
+      permissions
+        .filter((p): p is string => typeof p === 'string' && VALID_PERMISSION_IDS.has(p))
+    )
+  );
+}
+
+function paramId(value: string | string[] | undefined): string {
+  if (Array.isArray(value)) return value[0] || '';
+  return value || '';
+}
+
+function denyLeadAccess(res: Response) {
+  return res.status(403).json({ error: 'Unauthorized to access this lead' });
+}
+
+function assertLeadAccess(user: AuthUser | undefined, lead: { assigned_agent_id?: string | null }, res: Response): boolean {
+  if (canViewAllLeads(user)) return true;
+  if (lead.assigned_agent_id && lead.assigned_agent_id === user?.id) return true;
+  denyLeadAccess(res);
+  return false;
+}
+
+function assertCustomerAccess(
+  user: AuthUser | undefined,
+  customer: { assigned_agent_id?: string | null },
+  res: Response
+): boolean {
+  if (canViewAllLeads(user)) return true;
+  if (customer.assigned_agent_id && customer.assigned_agent_id === user?.id) return true;
+  res.status(403).json({ error: 'Unauthorized to access this customer' });
+  return false;
+}
+
+function assertOrderAccess(
+  user: AuthUser | undefined,
+  order: { assigned_staff_id?: string | null; customer_id?: string },
+  res: Response
+): boolean {
+  if (canViewAllLeads(user)) return true;
+  if (order.assigned_staff_id && order.assigned_staff_id === user?.id) return true;
+  if (order.customer_id) {
+    const cust = db
+      .prepare('SELECT assigned_agent_id FROM customers WHERE id = ?')
+      .get(order.customer_id) as { assigned_agent_id?: string } | undefined;
+    if (cust?.assigned_agent_id === user?.id) return true;
+  }
+  res.status(403).json({ error: 'Unauthorized to access this order' });
+  return false;
+}
+
+function isSafeSqlId(id: string): boolean {
+  return /^[a-zA-Z0-9_-]+$/.test(id);
+}
+
+function countActiveAdmins(): number {
+  return (
+    db.prepare(`SELECT count(*) as count FROM users WHERE role = 'admin' AND (status IS NULL OR status = 'active')`).get() as {
+      count: number;
+    }
+  ).count;
+}
+
 // --- HELPER FUNCTIONS ---
+function getTagsForLeadIds(leadIds: string[]): Record<string, { id: string; name: string; color: string }[]> {
+  const map: Record<string, { id: string; name: string; color: string }[]> = {};
+  if (!leadIds.length) return map;
+  const placeholders = leadIds.map(() => '?').join(',');
+  const rows = db.prepare(`
+    SELECT lt.lead_id, t.id, t.name, t.color
+    FROM lead_tags lt
+    JOIN tags t ON t.id = lt.tag_id
+    WHERE lt.lead_id IN (${placeholders}) AND t.is_active = 1
+    ORDER BY t.name ASC
+  `).all(...leadIds) as any[];
+  for (const row of rows) {
+    if (!map[row.lead_id]) map[row.lead_id] = [];
+    map[row.lead_id].push({ id: row.id, name: row.name, color: row.color });
+  }
+  return map;
+}
+
+function setLeadTags(leadId: string, tagIds: string[] | undefined | null) {
+  if (tagIds === undefined) return;
+  const uniqueIds = Array.from(new Set((tagIds || []).filter(Boolean)));
+  db.prepare('DELETE FROM lead_tags WHERE lead_id = ?').run(leadId);
+  const insert = db.prepare('INSERT OR IGNORE INTO lead_tags (id, lead_id, tag_id) VALUES (?, ?, ?)');
+  for (const tagId of uniqueIds) {
+    const exists = db.prepare('SELECT id FROM tags WHERE id = ? AND is_active = 1').get(tagId);
+    if (!exists) continue;
+    insert.run(`lt-${leadId}-${tagId}`, leadId, tagId);
+    syncRecordToMongo('lead_tags', { id: `lt-${leadId}-${tagId}`, lead_id: leadId, tag_id: tagId });
+  }
+}
+
+function getTagsForFollowUps(followups: Array<{ id: string; lead_id?: string | null }>): Record<string, { id: string; name: string; color: string }[]> {
+  const map: Record<string, { id: string; name: string; color: string }[]> = {};
+  if (!followups.length) return map;
+
+  const fupIds = followups.map((f) => f.id);
+  const leadIds = Array.from(new Set(followups.map((f) => f.lead_id).filter(Boolean))) as string[];
+
+  // 1. Direct tags attached to follow-up
+  const fupPlaceholders = fupIds.map(() => '?').join(',');
+  const fupRows = db.prepare(`
+    SELECT ft.follow_up_id, t.id, t.name, t.color
+    FROM follow_up_tags ft
+    JOIN tags t ON t.id = ft.tag_id
+    WHERE ft.follow_up_id IN (${fupPlaceholders}) AND t.is_active = 1
+    ORDER BY t.name ASC
+  `).all(...fupIds) as any[];
+
+  for (const row of fupRows) {
+    if (!map[row.follow_up_id]) map[row.follow_up_id] = [];
+    map[row.follow_up_id].push({ id: row.id, name: row.name, color: row.color });
+  }
+
+  // 2. Inherit / synchronize tags from the linked lead
+  if (leadIds.length > 0) {
+    const leadMap = getTagsForLeadIds(leadIds);
+    for (const f of followups) {
+      if (f.lead_id && leadMap[f.lead_id]) {
+        const existing = map[f.id] || [];
+        const existingIds = new Set(existing.map((t) => t.id));
+        for (const lt of leadMap[f.lead_id]) {
+          if (!existingIds.has(lt.id)) {
+            existing.push(lt);
+            existingIds.add(lt.id);
+          }
+        }
+        map[f.id] = existing;
+      }
+    }
+  }
+
+  return map;
+}
+
+function setFollowUpTags(followUpId: string, tagIds: string[] | undefined | null, leadId?: string | null) {
+  if (tagIds === undefined) return;
+  const uniqueIds = Array.from(new Set((tagIds || []).filter(Boolean)));
+
+  db.prepare('DELETE FROM follow_up_tags WHERE follow_up_id = ?').run(followUpId);
+  const insertFupTag = db.prepare('INSERT OR IGNORE INTO follow_up_tags (id, follow_up_id, tag_id) VALUES (?, ?, ?)');
+  for (const tagId of uniqueIds) {
+    const exists = db.prepare('SELECT id FROM tags WHERE id = ? AND is_active = 1').get(tagId);
+    if (!exists) continue;
+    insertFupTag.run(`ft-${followUpId}-${tagId}`, followUpId, tagId);
+  }
+
+  // Also keep linked lead's tags in sync so all views (Leads, Kanban, Pipeline) stay unified
+  if (leadId) {
+    setLeadTags(leadId, uniqueIds);
+  }
+}
+
 function generateCode(prefix: string, table: string, column: string): string {
   const row = db.prepare(`SELECT COUNT(*) as count FROM ${table}`).get() as { count: number };
   const num = (row.count + 1).toString().padStart(4, '0');
@@ -80,6 +240,10 @@ export const login = (req: AuthenticatedRequest, res: Response) => {
     return res.status(401).json({ error: 'Invalid email or password' });
   }
 
+  if (user.status && user.status !== 'active') {
+    return res.status(403).json({ error: 'Account is inactive. Contact an administrator.' });
+  }
+
   const valid = bcrypt.compareSync(password, user.password);
   if (!valid) {
     return res.status(401).json({ error: 'Invalid email or password' });
@@ -93,7 +257,9 @@ export const login = (req: AuthenticatedRequest, res: Response) => {
     role: user.role
   });
 
+  const perms = db.prepare('SELECT permission FROM role_permissions WHERE role_slug = ?').all(user.role) as { permission: string }[];
   const { password: _, ...userWithoutPassword } = user;
+  userWithoutPassword.permissions = perms.map((p) => p.permission);
   return res.json({ token, user: userWithoutPassword });
 };
 
@@ -108,14 +274,36 @@ export const getMe = (req: AuthenticatedRequest, res: Response) => {
 
 // ================= USERS & AGENTS CONTROLLERS =================
 export const getUsers = (req: AuthenticatedRequest, res: Response) => {
-  const users = db.prepare('SELECT id, name, email, role, phone, avatar, status, created_at FROM users ORDER BY name ASC').all();
-  return res.json(users);
+  // Full directory (email/phone) only for user managers; others get assignee directory
+  if (hasPermission(req.user, 'manage_users')) {
+    const users = db
+      .prepare('SELECT id, name, email, role, phone, avatar, status, created_at FROM users ORDER BY name ASC')
+      .all();
+    return res.json(users);
+  }
+  const directory = db
+    .prepare(
+      `SELECT id, name, role, avatar, status FROM users
+       WHERE (status IS NULL OR status = 'active')
+       ORDER BY name ASC`
+    )
+    .all();
+  return res.json(directory);
 };
 
 export const createUser = (req: AuthenticatedRequest, res: Response) => {
   const { name, email, password, role, phone } = req.body;
   if (!name || !email || !password || !role) {
     return res.status(400).json({ error: 'Name, email, password, and role are required' });
+  }
+
+  if (typeof password !== 'string' || password.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  }
+
+  const roleExists = db.prepare('SELECT slug FROM roles WHERE slug = ?').get(role);
+  if (!roleExists) {
+    return res.status(400).json({ error: `Role '${role}' does not exist` });
   }
 
   const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
@@ -152,6 +340,10 @@ export const updateUserRole = (req: AuthenticatedRequest, res: Response) => {
     return res.status(400).json({ error: `Role '${role}' does not exist` });
   }
 
+  if (user.role === 'admin' && role !== 'admin' && countActiveAdmins() <= 1) {
+    return res.status(400).json({ error: 'Cannot demote the last active administrator.' });
+  }
+
   db.prepare('UPDATE users SET role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(role, id);
   logAudit(req.user?.id, req.user?.name, 'UPDATE_USER_ROLE', 'user', id, `Changed role of user ${user.name} to ${role}`);
 
@@ -159,17 +351,22 @@ export const updateUserRole = (req: AuthenticatedRequest, res: Response) => {
 };
 
 export const deleteUser = (req: AuthenticatedRequest, res: Response) => {
-  const { id } = req.params;
+  const id = paramId(req.params.id);
   if (req.user?.id === id) {
     return res.status(400).json({ error: 'You cannot delete your own account.' });
   }
 
-  const user = db.prepare('SELECT id, name, role FROM users WHERE id = ?').get(id) as any;
+  const user = db.prepare('SELECT id, name, role, status FROM users WHERE id = ?').get(id) as any;
   if (!user) {
     return res.status(404).json({ error: 'User not found' });
   }
 
+  if (user.role === 'admin' && countActiveAdmins() <= 1) {
+    return res.status(400).json({ error: 'Cannot delete the last active administrator.' });
+  }
+
   db.prepare('DELETE FROM users WHERE id = ?').run(id);
+  deleteRecordFromMongo('users', id);
   logAudit(req.user?.id, req.user?.name, 'DELETE_USER', 'user', id, `Deleted user ${user.name}`);
 
   return res.json({ message: 'User deleted successfully' });
@@ -229,12 +426,13 @@ export const createRole = (req: AuthenticatedRequest, res: Response) => {
     VALUES (?, ?, ?, ?, ?, 0)
   `).run(id, name.trim(), finalSlug, description || '', roleColor);
 
-  if (Array.isArray(permissions) && permissions.length > 0) {
+  const cleanPerms = sanitizePermissions(permissions);
+  if (cleanPerms.length > 0) {
     const insertPerm = db.prepare(`
       INSERT OR IGNORE INTO role_permissions (id, role_slug, permission)
       VALUES (?, ?, ?)
     `);
-    for (const p of permissions) {
+    for (const p of cleanPerms) {
       insertPerm.run(`rp-${finalSlug}-${p}`, finalSlug, p);
     }
   }
@@ -260,13 +458,15 @@ export const updateRolePermissions = (req: AuthenticatedRequest, res: Response) 
     return res.status(400).json({ error: 'Permissions must be an array of strings' });
   }
 
+  const cleanPerms = sanitizePermissions(permissions);
+
   const transaction = db.transaction(() => {
     db.prepare('DELETE FROM role_permissions WHERE role_slug = ?').run(role.slug);
     const insertPerm = db.prepare(`
       INSERT INTO role_permissions (id, role_slug, permission)
       VALUES (?, ?, ?)
     `);
-    for (const p of permissions) {
+    for (const p of cleanPerms) {
       insertPerm.run(`rp-${role.slug}-${p}-${Date.now()}`, role.slug, p);
     }
   });
@@ -274,7 +474,7 @@ export const updateRolePermissions = (req: AuthenticatedRequest, res: Response) 
   transaction();
   logAudit(req.user?.id, req.user?.name, 'UPDATE_ROLE_PERMISSIONS', 'role', role.id, `Updated permissions for role ${role.name}`);
 
-  return res.json({ message: 'Role permissions updated successfully' });
+  return res.json({ message: 'Role permissions updated successfully', permissions: cleanPerms });
 };
 
 export const updateRole = (req: AuthenticatedRequest, res: Response) => {
@@ -319,6 +519,7 @@ export const deleteRole = (req: AuthenticatedRequest, res: Response) => {
     db.prepare('DELETE FROM roles WHERE id = ?').run(role.id);
   })();
 
+  deleteRecordFromMongo('roles', role.id);
   logAudit(req.user?.id, req.user?.name, 'DELETE_ROLE', 'role', role.id, `Deleted role ${role.name}`);
   return res.json({ message: 'Role deleted successfully' });
 };
@@ -339,6 +540,84 @@ export const createSource = (req: AuthenticatedRequest, res: Response) => {
   } catch (err: any) {
     return res.status(400).json({ error: 'Source already exists' });
   }
+};
+
+// ================= LEAD TAGS =================
+export const getTags = (req: AuthenticatedRequest, res: Response) => {
+  const includeInactive = String(req.query.all || '') === '1' && req.user?.role === 'admin';
+  const tags = includeInactive
+    ? db.prepare(`
+        SELECT t.*, (SELECT COUNT(*) FROM lead_tags lt WHERE lt.tag_id = t.id) as lead_count
+        FROM tags t
+        ORDER BY t.name ASC
+      `).all()
+    : db.prepare(`
+        SELECT t.*, (SELECT COUNT(*) FROM lead_tags lt WHERE lt.tag_id = t.id) as lead_count
+        FROM tags t
+        WHERE t.is_active = 1
+        ORDER BY t.name ASC
+      `).all();
+  return res.json(tags);
+};
+
+export const createTag = (req: AuthenticatedRequest, res: Response) => {
+  const { name, color } = req.body;
+  if (!name || !String(name).trim()) {
+    return res.status(400).json({ error: 'Tag name is required' });
+  }
+  const id = `tag-${Date.now()}`;
+  try {
+    db.prepare('INSERT INTO tags (id, name, color, is_active) VALUES (?, ?, ?, 1)').run(
+      id,
+      String(name).trim(),
+      color || '#10b981'
+    );
+    syncRecordToMongo('tags', { id, name: String(name).trim(), color: color || '#10b981', is_active: 1 });
+    logAudit(req.user?.id, req.user?.name, 'CREATE_TAG', 'tag', id, `Created tag ${name}`);
+    return res.status(201).json({ message: 'Tag created', id });
+  } catch (err: any) {
+    return res.status(400).json({ error: 'A tag with this name already exists' });
+  }
+};
+
+export const updateTag = (req: AuthenticatedRequest, res: Response) => {
+  const { id } = req.params;
+  const { name, color, is_active } = req.body;
+  const tag = db.prepare('SELECT * FROM tags WHERE id = ?').get(id) as any;
+  if (!tag) return res.status(404).json({ error: 'Tag not found' });
+
+  try {
+    db.prepare(`
+      UPDATE tags SET
+        name = COALESCE(?, name),
+        color = COALESCE(?, color),
+        is_active = COALESCE(?, is_active)
+      WHERE id = ?
+    `).run(
+      name !== undefined ? String(name).trim() : null,
+      color || null,
+      is_active !== undefined ? (is_active ? 1 : 0) : null,
+      id
+    );
+    const updated = db.prepare('SELECT * FROM tags WHERE id = ?').get(id);
+    syncRecordToMongo('tags', updated);
+    return res.json({ message: 'Tag updated successfully' });
+  } catch (err: any) {
+    return res.status(400).json({ error: 'Could not update tag (name may already exist)' });
+  }
+};
+
+export const deleteTag = (req: AuthenticatedRequest, res: Response) => {
+  const id = paramId(req.params.id);
+  const tag = db.prepare('SELECT * FROM tags WHERE id = ?').get(id) as any;
+  if (!tag) return res.status(404).json({ error: 'Tag not found' });
+
+  // Soft-delete so historical assignments remain resolvable if needed
+  db.prepare('UPDATE tags SET is_active = 0 WHERE id = ?').run(id);
+  db.prepare('DELETE FROM lead_tags WHERE tag_id = ?').run(id);
+  deleteRecordFromMongo('tags', id);
+  logAudit(req.user?.id, req.user?.name, 'DELETE_TAG', 'tag', id, `Deactivated tag ${tag.name}`);
+  return res.json({ message: 'Tag deleted successfully' });
 };
 
 export const getFunnelStages = (req: AuthenticatedRequest, res: Response) => {
@@ -402,7 +681,7 @@ export const updateFunnelStage = (req: AuthenticatedRequest, res: Response) => {
 };
 
 export const deleteFunnelStage = (req: AuthenticatedRequest, res: Response) => {
-  const { id } = req.params;
+  const id = paramId(req.params.id);
   const { fallback_stage_id } = req.body;
 
   // Check how many leads currently belong to this stage
@@ -423,6 +702,7 @@ export const deleteFunnelStage = (req: AuthenticatedRequest, res: Response) => {
   }
 
   db.prepare('DELETE FROM funnel_stages WHERE id = ?').run(id);
+  deleteRecordFromMongo('funnel_stages', id);
   logAudit(req.user?.id, req.user?.name, 'DELETE_STAGE', 'funnel_stage', id, `Deleted stage ${id}`);
   return res.json({ message: 'Stage deleted successfully' });
 };
@@ -449,7 +729,7 @@ export const reorderFunnelStages = (req: AuthenticatedRequest, res: Response) =>
 
 // ================= LEADS CONTROLLERS =================
 export const getLeads = (req: AuthenticatedRequest, res: Response) => {
-  const { stage_id, source, agent_id, priority, likelihood, status, search, from_date, to_date, page = 1, limit = 50 } = req.query;
+  const { stage_id, source, agent_id, priority, likelihood, status, search, tag_id, from_date, to_date, page = 1, limit = 50 } = req.query;
 
   let query = `
     SELECT l.*, 
@@ -463,10 +743,15 @@ export const getLeads = (req: AuthenticatedRequest, res: Response) => {
   `;
   const params: any[] = [];
 
-  // Role filtering: agent only sees their own leads
-  if (req.user?.role === 'agent') {
+  if (tag_id && String(tag_id) !== 'undefined' && String(tag_id) !== 'null') {
+    query += ` AND EXISTS (SELECT 1 FROM lead_tags lt WHERE lt.lead_id = l.id AND lt.tag_id = ?)`;
+    params.push(tag_id);
+  }
+
+  // Scope users without view_all_leads to their assigned leads
+  if (!canViewAllLeads(req.user)) {
     query += ` AND l.assigned_agent_id = ?`;
-    params.push(req.user.id);
+    params.push(req.user!.id);
   } else if (agent_id) {
     query += ` AND l.assigned_agent_id = ?`;
     params.push(agent_id);
@@ -518,11 +803,13 @@ export const getLeads = (req: AuthenticatedRequest, res: Response) => {
   const pagedQuery = `${query} LIMIT ? OFFSET ?`;
   const pagedParams = [...params, Number(limit), offset];
 
-  const leads = db.prepare(pagedQuery).all(...pagedParams);
+  const leads = db.prepare(pagedQuery).all(...pagedParams) as any[];
   const totalCount = db.prepare(`SELECT count(*) as total FROM (${query})`).get(...params) as { total: number };
+  const tagMap = getTagsForLeadIds(leads.map((l) => l.id));
+  const data = leads.map((l) => ({ ...l, tags: tagMap[l.id] || [] }));
 
   return res.json({
-    data: leads,
+    data,
     pagination: {
       total: totalCount.total,
       page: Number(page),
@@ -533,7 +820,7 @@ export const getLeads = (req: AuthenticatedRequest, res: Response) => {
 };
 
 export const getLeadById = (req: AuthenticatedRequest, res: Response) => {
-  const { id } = req.params;
+  const id = paramId(req.params.id);
   const lead = db.prepare(`
     SELECT l.*, 
       u.name as assigned_agent_name, 
@@ -547,10 +834,7 @@ export const getLeadById = (req: AuthenticatedRequest, res: Response) => {
 
   if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
-  // Permissions check for agent
-  if (req.user?.role === 'agent' && lead.assigned_agent_id !== req.user.id) {
-    return res.status(403).json({ error: 'Unauthorized to view this lead' });
-  }
+  if (!assertLeadAccess(req.user, lead, res)) return;
 
   const activities = db.prepare(`
     SELECT * FROM lead_activities 
@@ -566,7 +850,10 @@ export const getLeadById = (req: AuthenticatedRequest, res: Response) => {
     ORDER BY f.scheduled_at DESC
   `).all(id);
 
-  return res.json({ lead, activities, followups });
+  const tags = getTagsForLeadIds([id])[id] || [];
+  lead.tags = tags;
+
+  return res.json({ lead, activities, followups, tags });
 };
 
 export const createLead = (req: AuthenticatedRequest, res: Response) => {
@@ -585,7 +872,8 @@ export const createLead = (req: AuthenticatedRequest, res: Response) => {
     conversion_likelihood,
     estimated_deal_value,
     notes,
-    next_followup_at
+    next_followup_at,
+    tag_ids
   } = req.body;
 
   if (!customer_name || !phone || !lead_source) {
@@ -603,7 +891,13 @@ export const createLead = (req: AuthenticatedRequest, res: Response) => {
     targetStageId = firstStage?.id || 'stg-1';
   }
 
-  const agentId = assigned_agent_id || (req.user?.role === 'agent' ? req.user.id : null);
+  // Agents / scoped roles can only assign leads to themselves
+  let agentId = assigned_agent_id || null;
+  if (!canViewAllLeads(req.user)) {
+    agentId = req.user?.id || null;
+  } else if (!agentId && req.user?.role === 'agent') {
+    agentId = req.user.id;
+  }
 
   const insert = db.prepare(`
     INSERT INTO leads (
@@ -657,15 +951,21 @@ export const createLead = (req: AuthenticatedRequest, res: Response) => {
     );
   }
 
+  setLeadTags(id, Array.isArray(tag_ids) ? tag_ids : []);
+
+  const newLeadRecord = db.prepare('SELECT * FROM leads WHERE id = ?').get(id);
+  if (newLeadRecord) syncRecordToMongo('leads', newLeadRecord);
+
   logAudit(req.user?.id, req.user?.name, 'CREATE_LEAD', 'lead', id, `Created lead ${lead_code} (${customer_name})`);
 
   return res.status(201).json({ message: 'Lead created successfully', id, lead_code });
 };
 
 export const updateLead = (req: AuthenticatedRequest, res: Response) => {
-  const { id } = req.params;
+  const id = paramId(req.params.id);
   const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(id) as any;
   if (!lead) return res.status(404).json({ error: 'Lead not found' });
+  if (!assertLeadAccess(req.user, lead, res)) return;
 
   const {
     customer_name,
@@ -683,14 +983,20 @@ export const updateLead = (req: AuthenticatedRequest, res: Response) => {
     estimated_deal_value,
     notes,
     lost_reason,
-    next_followup_at
+    next_followup_at,
+    tag_ids
   } = req.body;
 
   const phone_normalized = phone ? normalizePhone(phone) : lead.phone_normalized;
 
+  // Scoped users cannot reassign leads to other agents
+  const nextAgentId = canViewAllLeads(req.user)
+    ? assigned_agent_id
+    : lead.assigned_agent_id;
+
   // Track changes for timeline
-  if (assigned_agent_id && assigned_agent_id !== lead.assigned_agent_id) {
-    const newAgent = db.prepare('SELECT name FROM users WHERE id = ?').get(assigned_agent_id) as any;
+  if (nextAgentId && nextAgentId !== lead.assigned_agent_id) {
+    const newAgent = db.prepare('SELECT name FROM users WHERE id = ?').get(nextAgentId) as any;
     db.prepare(`
       INSERT INTO lead_activities (id, lead_id, activity_type, title, notes, user_id, user_name)
       VALUES (?, ?, 'agent_assignment', 'Agent Reassigned', ?, ?, ?)
@@ -736,7 +1042,7 @@ export const updateLead = (req: AuthenticatedRequest, res: Response) => {
     city,
     lead_source,
     campaign_name,
-    assigned_agent_id,
+    nextAgentId,
     stage_id,
     priority,
     conversion_likelihood,
@@ -747,7 +1053,33 @@ export const updateLead = (req: AuthenticatedRequest, res: Response) => {
     id
   );
 
+  if (tag_ids !== undefined) {
+    setLeadTags(id, Array.isArray(tag_ids) ? tag_ids : []);
+  }
+
+  const updatedLeadRecord = db.prepare('SELECT * FROM leads WHERE id = ?').get(id);
+  if (updatedLeadRecord) syncRecordToMongo('leads', updatedLeadRecord);
+
   return res.json({ message: 'Lead updated successfully' });
+};
+
+// ================= UPDATE LEAD TAGS (REALTIME TOGGLE) =================
+export const updateLeadTags = (req: AuthenticatedRequest, res: Response) => {
+  const id = paramId(req.params.id);
+  const lead = db.prepare('SELECT id, lead_code, customer_name, assigned_agent_id FROM leads WHERE id = ?').get(id) as any;
+  if (!lead) return res.status(404).json({ error: 'Lead not found' });
+  if (!assertLeadAccess(req.user, lead, res)) return;
+
+  const { tag_ids } = req.body;
+  const safeTagIds = Array.isArray(tag_ids) ? tag_ids : [];
+  setLeadTags(id, safeTagIds);
+
+  const updatedTags = getTagsForLeadIds([id])[id] || [];
+
+  const updatedLeadRecord = db.prepare('SELECT * FROM leads WHERE id = ?').get(id);
+  if (updatedLeadRecord) syncRecordToMongo('leads', updatedLeadRecord);
+
+  return res.json({ success: true, message: 'Tags updated in real-time', tags: updatedTags });
 };
 
 // Update Stage (Drag and Drop Endpoint)
@@ -759,6 +1091,7 @@ export const updateLeadStage = (req: AuthenticatedRequest, res: Response) => {
 
   const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(id) as any;
   if (!lead) return res.status(404).json({ error: 'Lead not found' });
+  if (!assertLeadAccess(req.user, lead, res)) return;
 
   const targetStage = db.prepare('SELECT name FROM funnel_stages WHERE id = ?').get(stage_id) as any;
   if (!targetStage) return res.status(400).json({ error: 'Invalid funnel stage' });
@@ -782,6 +1115,9 @@ export const updateLeadStage = (req: AuthenticatedRequest, res: Response) => {
     req.user?.name
   );
 
+  const movedLeadRecord = db.prepare('SELECT * FROM leads WHERE id = ?').get(id);
+  if (movedLeadRecord) syncRecordToMongo('leads', movedLeadRecord);
+
   logAudit(req.user?.id, req.user?.name, 'STAGE_CHANGE', 'lead', id, `Moved lead ${lead.lead_code} to ${targetStage.name}`);
 
   return res.json({ message: 'Lead stage updated successfully', stage_name: targetStage.name });
@@ -795,6 +1131,10 @@ export const addLeadActivity = (req: AuthenticatedRequest, res: Response) => {
   if (!activity_type || !title) {
     return res.status(400).json({ error: 'Activity type and title are required' });
   }
+
+  const lead = db.prepare('SELECT id, assigned_agent_id FROM leads WHERE id = ?').get(id) as any;
+  if (!lead) return res.status(404).json({ error: 'Lead not found' });
+  if (!assertLeadAccess(req.user, lead, res)) return;
 
   const actId = `act-${Date.now()}`;
   db.prepare(`
@@ -873,12 +1213,259 @@ export const bulkStatusUpdate = (req: AuthenticatedRequest, res: Response) => {
   return res.json({ message: `Successfully moved ${lead_ids.length} leads to ${stage.name}` });
 };
 
+// ================= DELETE LEAD =================
+export const deleteLead = (req: AuthenticatedRequest, res: Response) => {
+  const id = paramId(req.params.id);
+  const lead = db.prepare('SELECT id, lead_code, customer_name, is_converted, assigned_agent_id FROM leads WHERE id = ?').get(id) as any;
+  if (!lead) return res.status(404).json({ error: 'Lead not found' });
+  if (!assertLeadAccess(req.user, lead, res)) return;
+
+  if (lead.is_converted) {
+    return res.status(400).json({ error: 'Cannot delete a converted lead. Converted leads are linked to active customer accounts.' });
+  }
+
+  db.prepare('DELETE FROM leads WHERE id = ?').run(id);
+  deleteRecordFromMongo('leads', id);
+  logAudit(req.user?.id, req.user?.name, 'DELETE_LEAD', 'lead', id, `Deleted lead ${lead.lead_code} (${lead.customer_name})`);
+
+  return res.json({ message: 'Lead deleted successfully' });
+};
+
+// ================= BULK IMPORT LEADS FROM XLS/CSV =================
+export const importLeads = (req: AuthenticatedRequest, res: Response) => {
+  const { leads, lead_source, assigned_agent_id, skip_duplicates = true } = req.body;
+
+  if (!Array.isArray(leads) || leads.length === 0) {
+    return res.status(400).json({ error: 'No lead records provided for import' });
+  }
+
+  // Ensure default lead source exists
+  const sourceName = lead_source || 'Excel / XLS Import';
+  let sourceRow = db.prepare('SELECT id FROM lead_sources WHERE name = ?').get(sourceName);
+  if (!sourceRow) {
+    const srcId = `src-excel-${Date.now()}`;
+    db.prepare(`
+      INSERT INTO lead_sources (id, name, icon, is_active)
+      VALUES (?, ?, 'FileSpreadsheet', 1)
+    `).run(srcId, sourceName);
+  }
+
+  // Pre-load all funnel stages
+  const stages = db.prepare('SELECT id, name FROM funnel_stages ORDER BY order_index ASC').all() as Array<{ id: string; name: string }>;
+  const stageMapByName = new Map<string, string>();
+  stages.forEach(s => stageMapByName.set(s.name.toLowerCase().trim(), s.id));
+  const defaultStageId = stages[0]?.id || 'stg-1';
+
+  // Smart stage mapping rules for XLS formats
+  const smartStageRules: Record<string, { stageId: string; tagId?: string }> = {
+    'not received': { stageId: 'stg-2' },
+    'contact pending': { stageId: 'stg-2' },
+    'received': { stageId: 'stg-3' },
+    'contacted': { stageId: 'stg-3' },
+    'cold': { stageId: 'stg-3', tagId: 'tag-cold' },
+    'call back': { stageId: 'stg-5' },
+    'callback': { stageId: 'stg-5' },
+    'follow up': { stageId: 'stg-5', tagId: 'tag-warm' },
+    'follow-up': { stageId: 'stg-5', tagId: 'tag-warm' },
+    'follow up required': { stageId: 'stg-5', tagId: 'tag-warm' },
+    'hot - j': { stageId: 'stg-4', tagId: 'tag-hot' },
+    'hot - w': { stageId: 'stg-4', tagId: 'tag-hot' },
+    'hot': { stageId: 'stg-4', tagId: 'tag-hot' },
+    'interested': { stageId: 'stg-4' },
+    'future lead': { stageId: 'stg-4', tagId: 'tag-warm' },
+    'b2b': { stageId: 'stg-6' },
+    'qualified': { stageId: 'stg-6' },
+    'invoice sent': { stageId: 'stg-7' },
+    'proposal/quotation sent': { stageId: 'stg-7' },
+    'paid': { stageId: 'stg-9' },
+    'confirmed': { stageId: 'stg-9' },
+    'converted': { stageId: 'stg-10' },
+    'lost': { stageId: 'stg-11' }
+  };
+
+  // Pre-load available tags
+  const existingTags = db.prepare('SELECT id, name FROM tags').all() as Array<{ id: string; name: string }>;
+  const tagIdSet = new Set(existingTags.map(t => t.id));
+
+  // Determine assigned agent
+  let defaultAgentId: string | null = assigned_agent_id || null;
+  if (!canViewAllLeads(req.user)) {
+    defaultAgentId = req.user?.id || null;
+  } else if (!defaultAgentId && req.user?.role === 'agent') {
+    defaultAgentId = req.user.id;
+  }
+
+  // Pre-fetch existing normalized phones for fast deduplication check
+  const existingPhones = new Set<string>();
+  const phoneRows = db.prepare('SELECT phone_normalized FROM leads WHERE phone_normalized IS NOT NULL').all() as Array<{ phone_normalized: string }>;
+  phoneRows.forEach(p => existingPhones.add(p.phone_normalized));
+
+  // Get current max lead count
+  const leadCountRow = db.prepare('SELECT COUNT(*) as count FROM leads').get() as { count: number };
+  let leadSeq = leadCountRow.count + 1;
+
+  const insertLeadStmt = db.prepare(`
+    INSERT INTO leads (
+      id, lead_code, customer_name, phone, phone_normalized, lead_source,
+      assigned_agent_id, stage_id, priority, conversion_likelihood,
+      notes, last_contacted_at, created_by, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const insertActivityStmt = db.prepare(`
+    INSERT INTO lead_activities (id, lead_id, activity_type, title, notes, user_id, user_name)
+    VALUES (?, ?, 'system', 'Lead Imported', ?, ?, ?)
+  `);
+
+  let importedCount = 0;
+  let duplicatesSkipped = 0;
+  let invalidSkipped = 0;
+  const importedLeadsSample: any[] = [];
+  const importedIds: string[] = [];
+  const recordsToSyncMongo: any[] = [];
+
+  const runImportTx = db.transaction(() => {
+    for (const item of leads) {
+      const rawPhone = String(item.phone || '').replace(/[\u200B-\u200D\uFEFF\u202A-\u202E\u00A0]/g, ' ').trim();
+      const digits = rawPhone.replace(/\D/g, '');
+      if (digits.length < 7) {
+        invalidSkipped++;
+        continue;
+      }
+
+      const normPhone = normalizePhone(rawPhone);
+      if (skip_duplicates && normPhone && existingPhones.has(normPhone)) {
+        duplicatesSkipped++;
+        continue;
+      }
+
+      if (normPhone) {
+        existingPhones.add(normPhone);
+      }
+
+      // Customer name
+      let custName = String(item.customer_name || '').replace(/^[~'\s]+|[~'\s]+$/g, '').trim();
+      if (!custName) {
+        custName = `Lead (${rawPhone})`;
+      }
+
+      // Stage & Tag matching
+      const rawStage = String(item.stage_name || item.raw_stage || item.stage || '').toLowerCase().trim();
+      let targetStageId = defaultStageId;
+      let matchedTagId: string | undefined = undefined;
+
+      if (smartStageRules[rawStage]) {
+        targetStageId = smartStageRules[rawStage].stageId;
+        matchedTagId = smartStageRules[rawStage].tagId;
+      } else if (stageMapByName.has(rawStage)) {
+        targetStageId = stageMapByName.get(rawStage)!;
+      }
+
+      // Format notes
+      let notes = item.notes;
+      if (!notes) {
+        const parts: string[] = [];
+        if (item.requirements) parts.push(`Requirements: ${item.requirements}`);
+        if (item.comments) parts.push(`Comments: ${item.comments}`);
+        if (item.calling_date && item.calling_date !== item.date) parts.push(`Calling Date: ${item.calling_date}`);
+        if (item.followup) parts.push(`Follow-up: ${item.followup}`);
+        notes = parts.join(' | ');
+      }
+
+      // Unique sequential lead code
+      let leadCode = `LD-${leadSeq.toString().padStart(4, '0')}`;
+      leadSeq++;
+      const codeExists = db.prepare('SELECT id FROM leads WHERE lead_code = ?').get(leadCode);
+      if (codeExists) {
+        leadCode = `LD-${Math.floor(1000 + Math.random() * 9000)}`;
+      }
+
+      const leadId = `lead-imp-${Date.now()}-${importedCount}-${Math.floor(Math.random() * 1000)}`;
+      const createdAt = item.date && String(item.date).match(/^\d{4}-\d{2}-\d{2}/) ? `${item.date} 10:00:00` : new Date().toISOString();
+      const lastContacted = item.calling_date && String(item.calling_date).match(/^\d{4}-\d{2}-\d{2}/) ? `${item.calling_date} 10:00:00` : null;
+
+      insertLeadStmt.run(
+        leadId,
+        leadCode,
+        custName,
+        rawPhone,
+        normPhone,
+        sourceName,
+        defaultAgentId,
+        targetStageId,
+        'Medium',
+        'Medium',
+        notes || null,
+        lastContacted,
+        req.user?.id || 'system',
+        createdAt
+      );
+
+      // Attach tag if matched
+      if (matchedTagId && tagIdSet.has(matchedTagId)) {
+        setLeadTags(leadId, [matchedTagId]);
+      }
+
+      insertActivityStmt.run(
+        `act-${Date.now()}-${importedCount}`,
+        leadId,
+        `Imported lead via Excel/XLS batch from file`,
+        req.user?.id,
+        req.user?.name || 'System'
+      );
+
+      importedCount++;
+      importedIds.push(leadId);
+
+      const createdLead = db.prepare('SELECT * FROM leads WHERE id = ?').get(leadId);
+      if (createdLead) {
+        recordsToSyncMongo.push(createdLead);
+      }
+
+      if (importedLeadsSample.length < 5) {
+        importedLeadsSample.push({
+          id: leadId,
+          lead_code: leadCode,
+          customer_name: custName,
+          phone: rawPhone,
+          stage_id: targetStageId
+        });
+      }
+    }
+  });
+
+  runImportTx();
+
+  // Async sync to MongoDB Atlas
+  for (const rec of recordsToSyncMongo) {
+    syncRecordToMongo('leads', rec);
+  }
+
+  logAudit(
+    req.user?.id,
+    req.user?.name,
+    'IMPORT_LEADS',
+    'lead',
+    importedIds.slice(0, 20),
+    `Imported ${importedCount} leads from XLS file (${duplicatesSkipped} duplicates skipped, ${invalidSkipped} invalid skipped)`
+  );
+
+  return res.status(201).json({
+    success: true,
+    count: importedCount,
+    duplicates_skipped: duplicatesSkipped,
+    skipped_invalid: invalidSkipped,
+    sample: importedLeadsSample
+  });
+};
+
 // ================= ONE-CLICK CONVERT LEAD TO CUSTOMER =================
 export const convertLeadToCustomer = (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
   const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(id) as any;
 
   if (!lead) return res.status(404).json({ error: 'Lead not found' });
+  if (!assertLeadAccess(req.user, lead, res)) return;
   if (lead.is_converted) {
     return res.status(400).json({
       error: 'Lead is already converted',
@@ -962,6 +1549,11 @@ export const convertLeadToCustomer = (req: AuthenticatedRequest, res: Response) 
 
   try {
     conversionTx();
+    const convertedLead = db.prepare('SELECT * FROM leads WHERE id = ?').get(lead.id);
+    if (convertedLead) syncRecordToMongo('leads', convertedLead);
+    const convertedCust = db.prepare('SELECT * FROM customers WHERE id = ?').get(targetCustomerId);
+    if (convertedCust) syncRecordToMongo('customers', convertedCust);
+
     logAudit(req.user?.id, req.user?.name, 'CONVERT_LEAD', 'lead', lead.id, `Converted lead ${lead.lead_code} to customer ${targetCustomerId}`);
 
     return res.json({
@@ -988,7 +1580,10 @@ export const getCustomers = (req: AuthenticatedRequest, res: Response) => {
   `;
   const params: any[] = [];
 
-  if (agent_id) {
+  if (!canViewAllLeads(req.user)) {
+    query += ` AND c.assigned_agent_id = ?`;
+    params.push(req.user!.id);
+  } else if (agent_id) {
     query += ` AND c.assigned_agent_id = ?`;
     params.push(agent_id);
   }
@@ -1030,7 +1625,7 @@ export const getCustomers = (req: AuthenticatedRequest, res: Response) => {
 };
 
 export const getCustomerById = (req: AuthenticatedRequest, res: Response) => {
-  const { id } = req.params;
+  const id = paramId(req.params.id);
   const customer = db.prepare(`
     SELECT c.*, u.name as assigned_agent_name, l.lead_code as original_lead_code, l.lead_source as original_lead_source
     FROM customers c
@@ -1040,6 +1635,7 @@ export const getCustomerById = (req: AuthenticatedRequest, res: Response) => {
   `).get(id) as any;
 
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
+  if (!assertCustomerAccess(req.user, customer, res)) return;
 
   // Customer orders
   const orders = db.prepare(`
@@ -1077,6 +1673,9 @@ export const createCustomer = (req: AuthenticatedRequest, res: Response) => {
   const id = `cust-${Date.now()}`;
   const customer_code = generateCode('CUST', 'customers', 'customer_code');
   const phone_normalized = normalizePhone(phone);
+  const agentId = canViewAllLeads(req.user)
+    ? (assigned_agent_id || req.user?.id)
+    : req.user?.id;
 
   db.prepare(`
     INSERT INTO customers (
@@ -1086,17 +1685,27 @@ export const createCustomer = (req: AuthenticatedRequest, res: Response) => {
   `).run(
     id, customer_code, name, phone, phone_normalized, alternate_phone || null,
     email || null, company || null, city || null, address || null,
-    assigned_agent_id || req.user?.id, notes || null, req.user?.id
+    agentId || null, notes || null, req.user?.id
   );
+
+  const createdCust = db.prepare('SELECT * FROM customers WHERE id = ?').get(id);
+  if (createdCust) syncRecordToMongo('customers', createdCust);
 
   return res.status(201).json({ message: 'Customer created successfully', id, customer_code });
 };
 
 export const updateCustomer = (req: AuthenticatedRequest, res: Response) => {
-  const { id } = req.params;
+  const id = paramId(req.params.id);
+  const existing = db.prepare('SELECT * FROM customers WHERE id = ?').get(id) as any;
+  if (!existing) return res.status(404).json({ error: 'Customer not found' });
+  if (!assertCustomerAccess(req.user, existing, res)) return;
+
   const { name, phone, alternate_phone, email, company, city, address, assigned_agent_id, notes } = req.body;
 
   const phone_normalized = phone ? normalizePhone(phone) : null;
+  const nextAgentId = canViewAllLeads(req.user)
+    ? assigned_agent_id
+    : existing.assigned_agent_id;
 
   db.prepare(`
     UPDATE customers SET
@@ -1112,14 +1721,17 @@ export const updateCustomer = (req: AuthenticatedRequest, res: Response) => {
       notes = COALESCE(?, notes),
       updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
-  `).run(name, phone, phone_normalized, alternate_phone, email, company, city, address, assigned_agent_id, notes, id);
+  `).run(name, phone, phone_normalized, alternate_phone, email, company, city, address, nextAgentId, notes, id);
+
+  const updatedCust = db.prepare('SELECT * FROM customers WHERE id = ?').get(id);
+  if (updatedCust) syncRecordToMongo('customers', updatedCust);
 
   return res.json({ message: 'Customer updated successfully' });
 };
 
 // ================= ORDERS & MANUAL TRACKING CONTROLLERS =================
 export const getOrders = (req: AuthenticatedRequest, res: Response) => {
-  const { search, customer_id, order_status, payment_status, phone, from_date, to_date, page = 1, limit = 50 } = req.query;
+  const { search, customer_id, order_status, payment_status, invoice_sent, phone, from_date, to_date, page = 1, limit = 50 } = req.query;
 
   let query = `
     SELECT o.*, c.customer_code, u.name as assigned_staff_name
@@ -1130,6 +1742,11 @@ export const getOrders = (req: AuthenticatedRequest, res: Response) => {
   `;
   const params: any[] = [];
 
+  if (!canViewAllLeads(req.user)) {
+    query += ` AND (o.assigned_staff_id = ? OR c.assigned_agent_id = ?)`;
+    params.push(req.user!.id, req.user!.id);
+  }
+
   if (customer_id) {
     query += ` AND o.customer_id = ?`;
     params.push(customer_id);
@@ -1138,9 +1755,15 @@ export const getOrders = (req: AuthenticatedRequest, res: Response) => {
     query += ` AND o.order_status = ?`;
     params.push(order_status);
   }
-  if (payment_status) {
+  if (payment_status === 'due') {
+    query += ` AND o.payment_status IN ('Pending', 'Partial')`;
+  } else if (payment_status) {
     query += ` AND o.payment_status = ?`;
     params.push(payment_status);
+  }
+  if (invoice_sent === '1' || invoice_sent === '0') {
+    query += ` AND COALESCE(o.invoice_sent, 0) = ?`;
+    params.push(Number(invoice_sent));
   }
   if (phone) {
     const pNorm = normalizePhone(String(phone));
@@ -1193,7 +1816,7 @@ export const getOrders = (req: AuthenticatedRequest, res: Response) => {
 };
 
 export const getOrderById = (req: AuthenticatedRequest, res: Response) => {
-  const { id } = req.params;
+  const id = paramId(req.params.id);
   const order = db.prepare(`
     SELECT o.*, c.customer_code, c.email as customer_email, c.address as customer_address, u.name as assigned_staff_name
     FROM orders o
@@ -1203,6 +1826,7 @@ export const getOrderById = (req: AuthenticatedRequest, res: Response) => {
   `).get(id) as any;
 
   if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (!assertOrderAccess(req.user, order, res)) return;
 
   // Get full tracking history
   const trackingHistory = db.prepare(`
@@ -1221,6 +1845,7 @@ export const createOrder = (req: AuthenticatedRequest, res: Response) => {
     quantity,
     order_amount,
     payment_status,
+    invoice_sent,
     order_status,
     start_location,
     current_location,
@@ -1236,6 +1861,7 @@ export const createOrder = (req: AuthenticatedRequest, res: Response) => {
 
   const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(customer_id) as any;
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
+  if (!assertCustomerAccess(req.user, customer, res)) return;
 
   const id = `ord-${Date.now()}`;
   const order_code = generateCode('ORD', 'orders', 'order_code');
@@ -1245,16 +1871,20 @@ export const createOrder = (req: AuthenticatedRequest, res: Response) => {
     ? String(end_location).trim()
     : (customer.address ? `${customer.address}, ${customer.city || ''}`.trim() : (customer.city ? `${customer.city} Delivery Address` : 'Customer Delivery Address'));
   const initialLocation = (current_location && String(current_location).trim()) ? String(current_location).trim() : initialStartLocation;
+  const invoiceFlag = invoice_sent ? 1 : 0;
+  const staffId = canViewAllLeads(req.user)
+    ? (assigned_staff_id || req.user?.id)
+    : req.user?.id;
 
   const orderTx = db.transaction(() => {
     // 1. Insert order with 3 locations
     db.prepare(`
       INSERT INTO orders (
         id, order_code, customer_id, customer_name, customer_phone, customer_phone_normalized,
-        product_name, quantity, order_amount, payment_status, order_status,
+        product_name, quantity, order_amount, payment_status, invoice_sent, order_status,
         start_location, current_location, end_location,
         expected_delivery_date, delivery_notes, assigned_staff_id, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       order_code,
@@ -1266,13 +1896,14 @@ export const createOrder = (req: AuthenticatedRequest, res: Response) => {
       Number(quantity) || 1,
       Number(order_amount),
       payment_status || 'Pending',
+      invoiceFlag,
       initialStatus,
       initialStartLocation,
       initialLocation,
       initialEndLocation,
       expected_delivery_date || null,
       delivery_notes || null,
-      assigned_staff_id || req.user?.id,
+      staffId || null,
       req.user?.id
     );
 
@@ -1304,6 +1935,12 @@ export const createOrder = (req: AuthenticatedRequest, res: Response) => {
   });
 
   orderTx();
+
+  const createdOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
+  if (createdOrder) syncRecordToMongo('orders', createdOrder);
+  const updatedCustAfterOrder = db.prepare('SELECT * FROM customers WHERE id = ?').get(customer.id);
+  if (updatedCustAfterOrder) syncRecordToMongo('customers', updatedCustAfterOrder);
+
   logAudit(req.user?.id, req.user?.name, 'CREATE_ORDER', 'order', id, `Created order ${order_code} for ${customer.name}`);
 
   return res.status(201).json({ message: 'Order created successfully', id, order_code });
@@ -1311,11 +1948,12 @@ export const createOrder = (req: AuthenticatedRequest, res: Response) => {
 
 // MANUAL LOCATION & STATUS UPDATE CONTROLLER (Supports 3 locations and tracking history)
 export const updateOrderLocationAndStatus = (req: AuthenticatedRequest, res: Response) => {
-  const { id } = req.params;
-  const { current_location, start_location, end_location, order_status, remarks, payment_status } = req.body;
+  const id = paramId(req.params.id);
+  const { current_location, start_location, end_location, order_status, remarks, payment_status, invoice_sent } = req.body;
 
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id) as any;
   if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (!assertOrderAccess(req.user, order, res)) return;
 
   const newStartLocation = (start_location !== undefined && String(start_location).trim()) ? String(start_location).trim() : (order.start_location || 'Central Origin Hub');
   const newEndLocation = (end_location !== undefined && String(end_location).trim()) ? String(end_location).trim() : (order.end_location || 'Customer Delivery Address');
@@ -1328,6 +1966,7 @@ export const updateOrderLocationAndStatus = (req: AuthenticatedRequest, res: Res
   }
 
   const newPayment = payment_status || order.payment_status;
+  const newInvoiceSent = invoice_sent !== undefined ? (invoice_sent ? 1 : 0) : (order.invoice_sent || 0);
 
   const updateTx = db.transaction(() => {
     // 1. Update order
@@ -1338,10 +1977,11 @@ export const updateOrderLocationAndStatus = (req: AuthenticatedRequest, res: Res
         end_location = ?,
         order_status = ?,
         payment_status = ?,
+        invoice_sent = ?,
         last_location_update = CURRENT_TIMESTAMP,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).run(newStartLocation, newLocation, newEndLocation, newStatus, newPayment, id);
+    `).run(newStartLocation, newLocation, newEndLocation, newStatus, newPayment, newInvoiceSent, id);
 
     // 2. Create permanent tracking entry
     db.prepare(`
@@ -1365,6 +2005,12 @@ export const updateOrderLocationAndStatus = (req: AuthenticatedRequest, res: Res
   });
 
   updateTx();
+
+  const updatedOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
+  if (updatedOrder) syncRecordToMongo('orders', updatedOrder);
+  const updatedCustAfterLocation = db.prepare('SELECT * FROM customers WHERE id = ?').get(order.customer_id);
+  if (updatedCustAfterLocation) syncRecordToMongo('customers', updatedCustAfterLocation);
+
   logAudit(req.user?.id, req.user?.name, 'UPDATE_ORDER_LOCATION', 'order', id, `Updated checkpoint to ${newLocation}, status to ${newStatus}`);
 
   return res.json({
@@ -1372,13 +2018,15 @@ export const updateOrderLocationAndStatus = (req: AuthenticatedRequest, res: Res
     start_location: newStartLocation,
     current_location: newLocation,
     end_location: newEndLocation,
-    order_status: newStatus
+    order_status: newStatus,
+    payment_status: newPayment,
+    invoice_sent: newInvoiceSent
   });
 };
 
 // ================= FOLLOW-UP MANAGEMENT CONTROLLERS =================
 export const getFollowUps = (req: AuthenticatedRequest, res: Response) => {
-  const { filter, assigned_user_id, client_date } = req.query; // filter: today, upcoming, overdue, all
+  const { filter, assigned_user_id, client_date, tag_id } = req.query; // filter: today, upcoming, overdue, all
   const todayDate = (typeof client_date === 'string' && client_date.trim()) || new Date().toISOString().split('T')[0];
 
   let query = `
@@ -1398,13 +2046,21 @@ export const getFollowUps = (req: AuthenticatedRequest, res: Response) => {
   `;
   const params: any[] = [];
 
-  // Agent restriction
-  if (req.user?.role === 'agent') {
+  // Scoped users only see their own follow-ups
+  if (!canViewAllLeads(req.user)) {
     query += ` AND f.assigned_user_id = ?`;
-    params.push(req.user.id);
+    params.push(req.user!.id);
   } else if (assigned_user_id) {
     query += ` AND f.assigned_user_id = ?`;
     params.push(assigned_user_id);
+  }
+
+  if (tag_id && String(tag_id) !== 'undefined' && String(tag_id) !== 'null') {
+    query += ` AND (
+      EXISTS (SELECT 1 FROM lead_tags lt WHERE lt.lead_id = f.lead_id AND lt.tag_id = ?)
+      OR EXISTS (SELECT 1 FROM follow_up_tags ft WHERE ft.follow_up_id = f.id AND ft.tag_id = ?)
+    )`;
+    params.push(tag_id, tag_id);
   }
 
   if (filter === 'today') {
@@ -1422,16 +2078,22 @@ export const getFollowUps = (req: AuthenticatedRequest, res: Response) => {
 
   query += ` ORDER BY f.scheduled_at ASC`;
 
-  const followups = db.prepare(query).all(...params);
-  return res.json(followups);
+  const followups = db.prepare(query).all(...params) as any[];
+  const tagMap = getTagsForFollowUps(followups);
+  const data = followups.map((f: any) => ({ ...f, tags: tagMap[f.id] || [] }));
+
+  return res.json(data);
 };
 
 export const completeFollowUp = (req: AuthenticatedRequest, res: Response) => {
-  const { id } = req.params;
-  const { outcome, notes, schedule_next, next_scheduled_at, next_purpose } = req.body;
+  const id = paramId(req.params.id);
+  const { outcome, notes, schedule_next, next_scheduled_at, next_purpose, tag_ids } = req.body;
 
   const fup = db.prepare('SELECT * FROM follow_ups WHERE id = ?').get(id) as any;
   if (!fup) return res.status(404).json({ error: 'Follow-up not found' });
+  if (!canViewAllLeads(req.user) && fup.assigned_user_id !== req.user?.id) {
+    return res.status(403).json({ error: 'Unauthorized to complete this follow-up' });
+  }
 
   const tx = db.transaction(() => {
     // 1. Mark completed
@@ -1453,7 +2115,12 @@ export const completeFollowUp = (req: AuthenticatedRequest, res: Response) => {
       `).run(`act-${Date.now()}`, fup.lead_id, notes || fup.purpose, outcome || 'Completed', req.user?.id, req.user?.name);
     }
 
-    // 3. If user requested another follow-up immediately
+    // 3. Update tags if passed
+    if (Array.isArray(tag_ids)) {
+      setFollowUpTags(id, tag_ids, fup.lead_id);
+    }
+
+    // 4. If user requested another follow-up immediately
     if (schedule_next && next_scheduled_at) {
       const nextId = `fup-${Date.now()}-next`;
       db.prepare(`
@@ -1487,6 +2154,9 @@ export const rescheduleFollowUp = (req: AuthenticatedRequest, res: Response) => 
 
   const fup = db.prepare('SELECT * FROM follow_ups WHERE id = ?').get(id) as any;
   if (!fup) return res.status(404).json({ error: 'Follow-up not found' });
+  if (!canViewAllLeads(req.user) && fup.assigned_user_id !== req.user?.id) {
+    return res.status(403).json({ error: 'Unauthorized to reschedule this follow-up' });
+  }
 
   db.prepare(`
     UPDATE follow_ups SET
@@ -1509,17 +2179,27 @@ export const rescheduleFollowUp = (req: AuthenticatedRequest, res: Response) => 
 };
 
 export const createFollowUp = (req: AuthenticatedRequest, res: Response) => {
-  const { lead_id, customer_id, assigned_user_id, scheduled_at, purpose, notes } = req.body;
+  const { lead_id, customer_id, assigned_user_id, scheduled_at, purpose, notes, tag_ids } = req.body;
   if (!scheduled_at) return res.status(400).json({ error: 'Scheduled date/time is required' });
   if (!purpose) return res.status(400).json({ error: 'Purpose is required' });
 
   const id = `fup-${Date.now()}`;
-  const assignedId = assigned_user_id || req.user?.id || 'usr-agt-1';
+  const assignedId = canViewAllLeads(req.user)
+    ? (assigned_user_id || req.user?.id)
+    : req.user?.id;
+
+  if (!assignedId) {
+    return res.status(400).json({ error: 'Assigned user is required' });
+  }
 
   db.prepare(`
     INSERT INTO follow_ups (id, lead_id, customer_id, assigned_user_id, scheduled_at, purpose, notes, status, created_by)
     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-  `).run(id, lead_id || null, customer_id || null, assignedId, scheduled_at, purpose, notes || null, req.user?.id || 'usr-admin-1');
+  `).run(id, lead_id || null, customer_id || null, assignedId, scheduled_at, purpose, notes || null, req.user?.id || null);
+
+  if (Array.isArray(tag_ids)) {
+    setFollowUpTags(id, tag_ids, lead_id);
+  }
 
   if (lead_id) {
     db.prepare('UPDATE leads SET next_followup_at = ? WHERE id = ?').run(scheduled_at, lead_id);
@@ -1530,6 +2210,26 @@ export const createFollowUp = (req: AuthenticatedRequest, res: Response) => {
   }
 
   return res.status(201).json({ message: 'Follow-up created successfully', id });
+};
+
+export const updateFollowUpTags = (req: AuthenticatedRequest, res: Response) => {
+  const id = paramId(req.params.id);
+  const { tag_ids } = req.body;
+
+  if (!Array.isArray(tag_ids)) {
+    return res.status(400).json({ error: 'tag_ids must be an array of tag IDs' });
+  }
+
+  const fup = db.prepare('SELECT * FROM follow_ups WHERE id = ?').get(id) as any;
+  if (!fup) return res.status(404).json({ error: 'Follow-up not found' });
+  if (!canViewAllLeads(req.user) && fup.assigned_user_id !== req.user?.id) {
+    return res.status(403).json({ error: 'Unauthorized to update this follow-up' });
+  }
+
+  setFollowUpTags(id, tag_ids, fup.lead_id);
+  const updatedTags = getTagsForFollowUps([fup])[id] || [];
+
+  return res.json({ message: 'Tags updated successfully', tags: updatedTags });
 };
 
 // ================= GLOBAL SEARCH CONTROLLER =================
@@ -1545,13 +2245,17 @@ export const globalSearch = (req: AuthenticatedRequest, res: Response) => {
   const digitsOnly = query.replace(/\D/g, '');
   const numberWildcard = digitsOnly ? `%${digitsOnly}%` : null;
 
+  const scoped = !canViewAllLeads(req.user);
+
   // 1. Search Customers
   let customerSql = `
     SELECT c.*, u.name as assigned_agent_name, l.lead_code as original_lead_code
     FROM customers c
     LEFT JOIN users u ON c.assigned_agent_id = u.id
     LEFT JOIN leads l ON c.linked_lead_id = l.id
-    WHERE c.name LIKE ? OR c.customer_code LIKE ? OR c.email LIKE ? OR c.phone LIKE ? OR c.company LIKE ? OR c.city LIKE ? OR c.address LIKE ?
+    WHERE (
+      c.name LIKE ? OR c.customer_code LIKE ? OR c.email LIKE ? OR c.phone LIKE ?
+      OR c.company LIKE ? OR c.city LIKE ? OR c.address LIKE ?
   `;
   const custParams: any[] = [wildcard, wildcard, wildcard, wildcard, wildcard, wildcard, wildcard];
   if (wildcardNorm) {
@@ -1562,6 +2266,11 @@ export const globalSearch = (req: AuthenticatedRequest, res: Response) => {
     customerSql += ` OR c.customer_code LIKE ?`;
     custParams.push(numberWildcard);
   }
+  customerSql += `)`;
+  if (scoped) {
+    customerSql += ` AND c.assigned_agent_id = ?`;
+    custParams.push(req.user!.id);
+  }
   customerSql += ` LIMIT 20`;
   const customers = db.prepare(customerSql).all(...custParams) as any[];
 
@@ -1571,7 +2280,9 @@ export const globalSearch = (req: AuthenticatedRequest, res: Response) => {
     FROM leads l
     LEFT JOIN users u ON l.assigned_agent_id = u.id
     LEFT JOIN funnel_stages fs ON l.stage_id = fs.id
-    WHERE l.customer_name LIKE ? OR l.lead_code LIKE ? OR l.email LIKE ? OR l.phone LIKE ? OR l.company_name LIKE ? OR l.city LIKE ? OR l.lead_source LIKE ?
+    WHERE (
+      l.customer_name LIKE ? OR l.lead_code LIKE ? OR l.email LIKE ? OR l.phone LIKE ?
+      OR l.company_name LIKE ? OR l.city LIKE ? OR l.lead_source LIKE ?
   `;
   const leadParams: any[] = [wildcard, wildcard, wildcard, wildcard, wildcard, wildcard, wildcard];
   if (wildcardNorm) {
@@ -1582,20 +2293,22 @@ export const globalSearch = (req: AuthenticatedRequest, res: Response) => {
     leadSql += ` OR l.lead_code LIKE ?`;
     leadParams.push(numberWildcard);
   }
-  // Role check
-  if (req.user?.role === 'agent') {
-    leadSql += ` AND l.assigned_agent_id = '${req.user.id}'`;
+  leadSql += `)`;
+  if (scoped) {
+    leadSql += ` AND l.assigned_agent_id = ?`;
+    leadParams.push(req.user!.id);
   }
   leadSql += ` LIMIT 20`;
   const leads = db.prepare(leadSql).all(...leadParams) as any[];
 
-  // 3. Search Orders (including locations, customer code, and number search)
+  // 3. Search Orders
   let orderSql = `
     SELECT o.*, c.customer_code, u.name as assigned_staff_name
     FROM orders o
     LEFT JOIN customers c ON o.customer_id = c.id
     LEFT JOIN users u ON o.assigned_staff_id = u.id
-    WHERE o.order_code LIKE ? OR o.customer_name LIKE ? OR o.product_name LIKE ? OR o.customer_phone LIKE ?
+    WHERE (
+      o.order_code LIKE ? OR o.customer_name LIKE ? OR o.product_name LIKE ? OR o.customer_phone LIKE ?
       OR o.start_location LIKE ? OR o.current_location LIKE ? OR o.end_location LIKE ? OR c.customer_code LIKE ?
   `;
   const orderParams: any[] = [wildcard, wildcard, wildcard, wildcard, wildcard, wildcard, wildcard, wildcard];
@@ -1607,10 +2320,15 @@ export const globalSearch = (req: AuthenticatedRequest, res: Response) => {
     orderSql += ` OR o.order_code LIKE ?`;
     orderParams.push(numberWildcard);
   }
-  // Also include orders of any customer found in this search
   if (customers.length > 0) {
-    const custIds = customers.map(c => `'${c.id}'`).join(',');
-    orderSql += ` OR o.customer_id IN (${custIds})`;
+    const placeholders = customers.map(() => '?').join(',');
+    orderSql += ` OR o.customer_id IN (${placeholders})`;
+    orderParams.push(...customers.map((c) => c.id));
+  }
+  orderSql += `)`;
+  if (scoped) {
+    orderSql += ` AND (o.assigned_staff_id = ? OR c.assigned_agent_id = ?)`;
+    orderParams.push(req.user!.id, req.user!.id);
   }
   orderSql += ` ORDER BY o.order_date DESC LIMIT 30`;
   const orders = db.prepare(orderSql).all(...orderParams) as any[];
@@ -1635,7 +2353,7 @@ export const globalSearch = (req: AuthenticatedRequest, res: Response) => {
 
 // ================= DASHBOARD & ANALYTICS CONTROLLER =================
 export const getAnalytics = (req: AuthenticatedRequest, res: Response) => {
-  const { range = '30d' } = req.query; // today, 7d, 30d, last_month, all
+  const { range = '30d', from, to } = req.query; // today, 7d, 30d, last_month, all, custom
 
   let dateFilter = '';
   if (range === 'today') {
@@ -1646,30 +2364,71 @@ export const getAnalytics = (req: AuthenticatedRequest, res: Response) => {
     dateFilter = "AND date(created_at) >= date('now', '-30 days')";
   } else if (range === 'last_month') {
     dateFilter = "AND strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now', '-1 month')";
+  } else if (range === 'custom' && from && to) {
+    // Validate YYYY-MM-DD to avoid SQL injection via query params
+    const fromStr = String(from);
+    const toStr = String(to);
+    const isoDate = /^\d{4}-\d{2}-\d{2}$/;
+    if (isoDate.test(fromStr) && isoDate.test(toStr)) {
+      dateFilter = `AND date(created_at) >= date('${fromStr}') AND date(created_at) <= date('${toStr}')`;
+    }
   }
 
+  const scoped = !canViewAllLeads(req.user);
+  const uid = req.user?.id || '';
+  if (scoped && !isSafeSqlId(uid)) {
+    return res.status(400).json({ error: 'Invalid user context' });
+  }
+  const leadScope = scoped ? `AND assigned_agent_id = '${uid}'` : '';
+  const leadScopeAliased = scoped ? `AND l.assigned_agent_id = '${uid}'` : '';
+  const fupScope = scoped ? `AND assigned_user_id = '${uid}'` : '';
+  const orderScope = scoped
+    ? `AND (assigned_staff_id = '${uid}' OR customer_id IN (SELECT id FROM customers WHERE assigned_agent_id = '${uid}'))`
+    : '';
+
   // 1. Total Leads
-  const totalLeadsRow = db.prepare(`SELECT count(*) as count FROM leads WHERE 1=1 ${dateFilter}`).get() as { count: number };
+  const totalLeadsRow = db.prepare(`SELECT count(*) as count FROM leads WHERE 1=1 ${dateFilter} ${leadScope}`).get() as { count: number };
   const totalLeads = totalLeadsRow.count;
 
-  // 2. Active Leads (in progress, not converted, not lost)
-  const activeLeadsRow = db.prepare(`
-    SELECT count(*) as count 
-    FROM leads l
-    JOIN funnel_stages fs ON l.stage_id = fs.id
-    WHERE l.is_converted = 0 AND fs.name != 'Lost' ${dateFilter.replace(/created_at/g, 'l.created_at')}
+  // 2. Pending Follow-ups
+  const pendingFollowUpsRow = db.prepare(`
+    SELECT count(*) as count FROM follow_ups WHERE status = 'pending' ${fupScope}
   `).get() as { count: number };
-  const activeLeads = activeLeadsRow.count;
+  const pendingFollowUps = pendingFollowUpsRow.count;
 
-  // 3. Converted Leads
-  const convertedLeadsRow = db.prepare(`SELECT count(*) as count FROM leads WHERE is_converted = 1 ${dateFilter}`).get() as { count: number };
+  const overdueFollowUpsCountRow = db.prepare(`
+    SELECT count(*) as count FROM follow_ups
+    WHERE status = 'pending' AND scheduled_at < datetime('now') ${fupScope}
+  `).get() as { count: number };
+  const overdueFollowUpsCount = overdueFollowUpsCountRow.count;
+
+  // Converted (kept for source/agent sections)
+  const convertedLeadsRow = db.prepare(`SELECT count(*) as count FROM leads WHERE is_converted = 1 ${dateFilter} ${leadScope}`).get() as { count: number };
   const convertedLeads = convertedLeadsRow.count;
 
-  // 4. Total Orders
+  // 3–5. Orders: Invoice Sent / Due Payment / Total Orders
   const orderDateFilter = dateFilter.replace(/created_at/g, 'order_date');
-  const totalOrdersRow = db.prepare(`SELECT count(*) as count, COALESCE(SUM(order_amount), 0) as total_revenue FROM orders WHERE 1=1 ${orderDateFilter}`).get() as { count: number; total_revenue: number };
+  const totalOrdersRow = db.prepare(`SELECT count(*) as count, COALESCE(SUM(order_amount), 0) as total_revenue FROM orders WHERE 1=1 ${orderDateFilter} ${orderScope}`).get() as { count: number; total_revenue: number };
   const totalOrders = totalOrdersRow.count;
   const totalRevenue = totalOrdersRow.total_revenue;
+
+  const invoiceStats = db.prepare(`
+    SELECT
+      SUM(CASE WHEN COALESCE(invoice_sent, 0) = 1 THEN 1 ELSE 0 END) as invoices_sent,
+      SUM(CASE WHEN COALESCE(invoice_sent, 0) = 0 THEN 1 ELSE 0 END) as invoices_pending
+    FROM orders
+    WHERE 1=1 ${orderDateFilter} ${orderScope}
+  `).get() as { invoices_sent: number; invoices_pending: number };
+  const invoicesSent = invoiceStats?.invoices_sent || 0;
+  const invoicesPending = invoiceStats?.invoices_pending || 0;
+
+  const duePaymentRow = db.prepare(`
+    SELECT count(*) as count, COALESCE(SUM(order_amount), 0) as due_amount
+    FROM orders
+    WHERE payment_status IN ('Pending', 'Partial') ${orderDateFilter} ${orderScope}
+  `).get() as { count: number; due_amount: number };
+  const duePayments = duePaymentRow.count;
+  const duePaymentAmount = duePaymentRow.due_amount;
 
   // Lead Conversion Rate
   const conversionRate = totalLeads > 0 ? ((convertedLeads / totalLeads) * 100).toFixed(1) : '0.0';
@@ -1678,7 +2437,7 @@ export const getAnalytics = (req: AuthenticatedRequest, res: Response) => {
   const leadsOverTime = db.prepare(`
     SELECT date(created_at) as date, count(*) as count
     FROM leads
-    WHERE date(created_at) >= date('now', '-14 days')
+    WHERE date(created_at) >= date('now', '-14 days') ${leadScope}
     GROUP BY date(created_at)
     ORDER BY date ASC
   `).all();
@@ -1689,7 +2448,7 @@ export const getAnalytics = (req: AuthenticatedRequest, res: Response) => {
       SUM(CASE WHEN is_converted = 1 THEN 1 ELSE 0 END) as converted_count,
       COALESCE(SUM(estimated_deal_value), 0) as total_deal_value
     FROM leads
-    WHERE 1=1 ${dateFilter}
+    WHERE 1=1 ${dateFilter} ${leadScope}
     GROUP BY lead_source
     ORDER BY total DESC
   `).all();
@@ -1702,7 +2461,7 @@ export const getAnalytics = (req: AuthenticatedRequest, res: Response) => {
       COALESCE(SUM(l.estimated_deal_value), 0) as total_deal_value
     FROM users u
     LEFT JOIN leads l ON l.assigned_agent_id = u.id ${dateFilter.replace(/created_at/g, 'l.created_at')}
-    WHERE u.role IN ('agent', 'manager')
+    WHERE u.role IN ('agent', 'manager') ${scoped ? `AND u.id = '${uid}'` : ''}
     GROUP BY u.id
     ORDER BY converted_leads DESC, total_leads DESC
   `).all();
@@ -1713,7 +2472,7 @@ export const getAnalytics = (req: AuthenticatedRequest, res: Response) => {
       COUNT(l.id) as lead_count,
       COALESCE(SUM(l.estimated_deal_value), 0) as deal_value
     FROM funnel_stages fs
-    LEFT JOIN leads l ON l.stage_id = fs.id AND l.is_converted = 0
+    LEFT JOIN leads l ON l.stage_id = fs.id AND l.is_converted = 0 ${leadScopeAliased}
     WHERE fs.is_active = 1
     GROUP BY fs.id
     ORDER BY fs.order_index ASC
@@ -1725,7 +2484,7 @@ export const getAnalytics = (req: AuthenticatedRequest, res: Response) => {
     FROM follow_ups f
     LEFT JOIN leads l ON f.lead_id = l.id
     LEFT JOIN users u ON f.assigned_user_id = u.id
-    WHERE f.scheduled_at < datetime('now') AND f.status = 'pending'
+    WHERE f.scheduled_at < datetime('now') AND f.status = 'pending' ${fupScope.replace(/assigned_user_id/, 'f.assigned_user_id')}
     ORDER BY f.scheduled_at ASC
     LIMIT 5
   `).all();
@@ -1735,7 +2494,7 @@ export const getAnalytics = (req: AuthenticatedRequest, res: Response) => {
     FROM follow_ups f
     LEFT JOIN leads l ON f.lead_id = l.id
     LEFT JOIN users u ON f.assigned_user_id = u.id
-    WHERE f.scheduled_at >= datetime('now') AND f.status = 'pending'
+    WHERE f.scheduled_at >= datetime('now') AND f.status = 'pending' ${fupScope.replace(/assigned_user_id/, 'f.assigned_user_id')}
     ORDER BY f.scheduled_at ASC
     LIMIT 5
   `).all();
@@ -1745,6 +2504,7 @@ export const getAnalytics = (req: AuthenticatedRequest, res: Response) => {
     SELECT a.*, l.customer_name as lead_name, l.lead_code
     FROM lead_activities a
     LEFT JOIN leads l ON a.lead_id = l.id
+    WHERE 1=1 ${leadScopeAliased}
     ORDER BY a.created_at DESC
     LIMIT 8
   `).all();
@@ -1754,6 +2514,7 @@ export const getAnalytics = (req: AuthenticatedRequest, res: Response) => {
     SELECT o.*, c.customer_code
     FROM orders o
     LEFT JOIN customers c ON o.customer_id = c.id
+    WHERE 1=1 ${orderScope.replace(/assigned_staff_id/g, 'o.assigned_staff_id').replace(/customer_id/g, 'o.customer_id')}
     ORDER BY o.order_date DESC
     LIMIT 6
   `).all();
@@ -1761,10 +2522,15 @@ export const getAnalytics = (req: AuthenticatedRequest, res: Response) => {
   return res.json({
     metrics: {
       totalLeads,
-      activeLeads,
-      convertedLeads,
+      pendingFollowUps,
+      overdueFollowUpsCount,
+      invoicesSent,
+      invoicesPending,
+      duePayments,
+      duePaymentAmount,
       totalOrders,
       totalRevenue,
+      convertedLeads,
       conversionRate
     },
     leadsOverTime,
@@ -1805,10 +2571,22 @@ export const getPublicForm = (req: any, res: Response) => {
 // Public form submission (no auth required)
 export const submitPublicForm = (req: any, res: Response) => {
   const { idOrSlug } = req.params;
-  const { answers } = req.body;
+  const { answers, _hp } = req.body;
 
-  if (!answers || typeof answers !== 'object') {
+  // Honeypot: bots fill hidden fields — silently accept without creating a lead
+  if (_hp) {
+    return res.json({
+      success: true,
+      message: 'Thank you! Your information has been received.'
+    });
+  }
+
+  if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
     return res.status(400).json({ error: 'Form submission answers are required.' });
+  }
+
+  if (Object.keys(answers).length > 80) {
+    return res.status(400).json({ error: 'Form submission is too large.' });
   }
 
   const form = db.prepare(`
@@ -1939,8 +2717,6 @@ export const submitPublicForm = (req: any, res: Response) => {
 
   return res.json({
     success: true,
-    lead_id,
-    lead_code,
     message: form.success_message || 'Thank you! Your information has been received.',
     redirect_url: form.redirect_url || null
   });
@@ -2119,11 +2895,12 @@ export const updateForm = (req: AuthenticatedRequest, res: Response) => {
 
 // Admin delete form
 export const deleteForm = (req: AuthenticatedRequest, res: Response) => {
-  const { id } = req.params;
+  const id = paramId(req.params.id);
   const form = db.prepare('SELECT title FROM web_forms WHERE id = ?').get(id) as any;
   if (!form) return res.status(404).json({ error: 'Form not found' });
 
   db.prepare('DELETE FROM web_forms WHERE id = ?').run(id);
+  deleteRecordFromMongo('web_forms', id);
   logAudit(req.user?.id, req.user?.name, 'DELETE_FORM', 'web_form', String(id), `Deleted form "${form.title}"`);
 
   return res.json({ message: 'Form deleted successfully' });

@@ -8,6 +8,17 @@ function getHeaders() {
   };
 }
 
+/** Drop empty / undefined params so URLSearchParams never sends "undefined" */
+function toQuery(params: Record<string, any> = {}): string {
+  const cleaned: Record<string, string> = {};
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === '') continue;
+    if (value === 'undefined' || value === 'null') continue;
+    cleaned[key] = String(value);
+  }
+  return new URLSearchParams(cleaned).toString();
+}
+
 async function handleResponse(res: Response) {
   if (res.status === 401) {
     localStorage.removeItem('crmx_token');
@@ -112,6 +123,37 @@ export const api = {
     const res = await fetch(`${API_URL}/sources`, { headers: getHeaders() });
     return handleResponse(res);
   },
+
+  // Lead Tags
+  getTags: async (all = false) => {
+    const qs = all ? '?all=1' : '';
+    const res = await fetch(`${API_URL}/tags${qs}`, { headers: getHeaders() });
+    return handleResponse(res);
+  },
+  createTag: async (payload: { name: string; color?: string }) => {
+    const res = await fetch(`${API_URL}/tags`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(payload)
+    });
+    return handleResponse(res);
+  },
+  updateTag: async (id: string, payload: { name?: string; color?: string; is_active?: boolean | number }) => {
+    const res = await fetch(`${API_URL}/tags/${id}`, {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify(payload)
+    });
+    return handleResponse(res);
+  },
+  deleteTag: async (id: string) => {
+    const res = await fetch(`${API_URL}/tags/${id}`, {
+      method: 'DELETE',
+      headers: getHeaders()
+    });
+    return handleResponse(res);
+  },
+
   getFunnelStages: async () => {
     const res = await fetch(`${API_URL}/funnel/stages`, { headers: getHeaders() });
     return handleResponse(res);
@@ -151,8 +193,8 @@ export const api = {
 
   // Leads
   getLeads: async (params: Record<string, any> = {}) => {
-    const qs = new URLSearchParams(params).toString();
-    const res = await fetch(`${API_URL}/leads?${qs}`, { headers: getHeaders() });
+    const qs = toQuery(params);
+    const res = await fetch(`${API_URL}/leads${qs ? `?${qs}` : ''}`, { headers: getHeaders() });
     return handleResponse(res);
   },
   getLeadById: async (id: string) => {
@@ -172,6 +214,14 @@ export const api = {
       method: 'PUT',
       headers: getHeaders(),
       body: JSON.stringify(payload)
+    });
+    return handleResponse(res);
+  },
+  updateLeadTags: async (id: string, tag_ids: string[]) => {
+    const res = await fetch(`${API_URL}/leads/${id}/tags`, {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify({ tag_ids })
     });
     return handleResponse(res);
   },
@@ -215,11 +265,26 @@ export const api = {
     });
     return handleResponse(res);
   },
+  deleteLead: async (id: string) => {
+    const res = await fetch(`${API_URL}/leads/${id}`, {
+      method: 'DELETE',
+      headers: getHeaders()
+    });
+    return handleResponse(res);
+  },
+  importLeads: async (payload: { leads: any[]; lead_source?: string; assigned_agent_id?: string; skip_duplicates?: boolean }) => {
+    const res = await fetch(`${API_URL}/leads/import`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(payload)
+    });
+    return handleResponse(res);
+  },
 
   // Customers
   getCustomers: async (params: Record<string, any> = {}) => {
-    const qs = new URLSearchParams(params).toString();
-    const res = await fetch(`${API_URL}/customers?${qs}`, { headers: getHeaders() });
+    const qs = toQuery(params);
+    const res = await fetch(`${API_URL}/customers${qs ? `?${qs}` : ''}`, { headers: getHeaders() });
     return handleResponse(res);
   },
   getCustomerById: async (id: string) => {
@@ -245,8 +310,8 @@ export const api = {
 
   // Orders & Tracking
   getOrders: async (params: Record<string, any> = {}) => {
-    const qs = new URLSearchParams(params).toString();
-    const res = await fetch(`${API_URL}/orders?${qs}`, { headers: getHeaders() });
+    const qs = toQuery(params);
+    const res = await fetch(`${API_URL}/orders${qs ? `?${qs}` : ''}`, { headers: getHeaders() });
     return handleResponse(res);
   },
   getOrderById: async (id: string) => {
@@ -268,6 +333,7 @@ export const api = {
     order_status?: string;
     remarks?: string;
     payment_status?: string;
+    invoice_sent?: boolean | number;
   }) => {
     const res = await fetch(`${API_URL}/orders/${id}/location`, {
       method: 'POST',
@@ -285,7 +351,7 @@ export const api = {
     const res = await fetch(`${API_URL}/follow-ups?${qs}`, { headers: getHeaders() });
     return handleResponse(res);
   },
-  createFollowUp: async (payload: { lead_id?: string; customer_id?: string; assigned_user_id?: string; scheduled_at: string; purpose: string; notes?: string }) => {
+  createFollowUp: async (payload: { lead_id?: string; customer_id?: string; assigned_user_id?: string; scheduled_at: string; purpose: string; notes?: string; tag_ids?: string[] }) => {
     const res = await fetch(`${API_URL}/follow-ups`, {
       method: 'POST',
       headers: getHeaders(),
@@ -309,6 +375,14 @@ export const api = {
     });
     return handleResponse(res);
   },
+  updateFollowUpTags: async (id: string, tag_ids: string[]) => {
+    const res = await fetch(`${API_URL}/follow-ups/${id}/tags`, {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify({ tag_ids })
+    });
+    return handleResponse(res);
+  },
 
   // Global Search
   search: async (q: string) => {
@@ -317,62 +391,13 @@ export const api = {
   },
 
   // Analytics
-  getAnalytics: async (range: string = '30d') => {
-    const res = await fetch(`${API_URL}/analytics/overview?range=${range}`, { headers: getHeaders() });
-    return handleResponse(res);
-  },
-
-  // Public Lead Forms
-  getPublicForm: async (idOrSlug: string) => {
-    const res = await fetch(`${API_URL}/public/forms/${encodeURIComponent(idOrSlug)}`);
-    return handleResponse(res);
-  },
-  submitPublicForm: async (idOrSlug: string, answers: Record<string, any>) => {
-    const res = await fetch(`${API_URL}/public/forms/${encodeURIComponent(idOrSlug)}/submit`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ answers })
-    });
-    return handleResponse(res);
-  },
-
-  // Web Forms Management (Admin & Manager)
-  getForms: async () => {
-    const res = await fetch(`${API_URL}/forms`, { headers: getHeaders() });
-    return handleResponse(res);
-  },
-  getFormById: async (id: string) => {
-    const res = await fetch(`${API_URL}/forms/${id}`, { headers: getHeaders() });
-    return handleResponse(res);
-  },
-  createForm: async (data: any) => {
-    const res = await fetch(`${API_URL}/forms`, {
-      method: 'POST',
-      headers: getHeaders(),
-      body: JSON.stringify(data)
-    });
-    return handleResponse(res);
-  },
-  updateForm: async (id: string, data: any) => {
-    const res = await fetch(`${API_URL}/forms/${id}`, {
-      method: 'PUT',
-      headers: getHeaders(),
-      body: JSON.stringify(data)
-    });
-    return handleResponse(res);
-  },
-  deleteForm: async (id: string) => {
-    const res = await fetch(`${API_URL}/forms/${id}`, {
-      method: 'DELETE',
-      headers: getHeaders()
-    });
-    return handleResponse(res);
-  },
-  toggleFormStatus: async (id: string) => {
-    const res = await fetch(`${API_URL}/forms/${id}/toggle`, {
-      method: 'POST',
-      headers: getHeaders()
-    });
+  getAnalytics: async (range: string = '30d', from?: string, to?: string) => {
+    const params = new URLSearchParams({ range });
+    if (range === 'custom' && from && to) {
+      params.set('from', from);
+      params.set('to', to);
+    }
+    const res = await fetch(`${API_URL}/analytics/overview?${params.toString()}`, { headers: getHeaders() });
     return handleResponse(res);
   }
 };
